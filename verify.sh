@@ -24,6 +24,10 @@ grep -q "readPin" "$TAP/index.js" 2>/dev/null \
 grep -q "Trae CN" "$TAP/scripts/trae-model-catalog.mjs" 2>/dev/null \
   && ok "Trae macOS db 发现" || bad "Trae macOS db 发现缺失"
 
+grep -q "account-switch" "$TAP/index.js" 2>/dev/null \
+  && grep -q "account-switch" "$TAP/lib/client.js" 2>/dev/null \
+  && ok "多账号账号簿与切换 UI" || bad "多账号改动缺失"
+
 VERSION="$(node -p "require('$TAP/package.json').version" 2>/dev/null || true)"
 grep -q "dsh-tap@$VERSION" "$PROFILE_DIR/pnpm-workspace.yaml" 2>/dev/null \
   && ok "patchedDependencies 已注册 ($VERSION)" || bad "patchedDependencies 未注册"

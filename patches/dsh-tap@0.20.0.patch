@@ -1,5 +1,5 @@
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..39aaf8d49296b5d05f1ccb1feb267b05f9fe036a 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e56aeaed7 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -43,7 +43,113 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..39aaf8d49296b5d05f1ccb1feb267b05
  import { createHostConfigLayer } from './host-config.js'
  import arkProvider from './providers/ark/index.js'
  import bailianProvider from './providers/bailian/index.js'
-@@ -1444,9 +1471,18 @@ function hostReconcileView(webService) {
+@@ -244,8 +271,103 @@ function validateBaseURL(value) {
+ 
+ const readFileLayer = () => readJson(SETTINGS_PATH)
+ const writeFileLayer = (section) => writeJson(SETTINGS_PATH, section)
+-const readAuth = () => readJson(AUTH_PATH)
+-const writeAuth = (v) => writeJson(AUTH_PATH, v)
++
++// ---------------------------------------------------------------------------
++// Credential account book（多账号，v2 存储 + v1 自动迁移）
++//
++// v1（旧）：{ machine, auth:{accessToken,refreshToken,...}, account:{uid,nickname,...} }
++// v2（新）：{ schemaVersion:2, machine, activeAccountId, accounts:[{id,auth,account,addedAt}] }
++//
++// oauth.js / resolveCredential 继续按「单账号」读写：readAuth() 返回 active
++// 账号的旧形状，writeAuth() 按内容归位到对应账号。这样多账号不需要改 OAuth
++// 状态机，登录第二个号时 writeAuth 收到不同 uid 就自动新增一条。
++const authStoreId = (account, index) =>
++  (typeof account?.uid === 'string' && account.uid) || `acc${index + 1}`
++
++function readAuthStore() {
++  const raw = readJson(AUTH_PATH)
++  if (Array.isArray(raw.accounts)) {
++    return {
++      schemaVersion: 2,
++      machine: raw.machine && typeof raw.machine === 'object' ? raw.machine : {},
++      accounts: raw.accounts.filter((a) => a && typeof a === 'object'),
++      activeAccountId: typeof raw.activeAccountId === 'string' ? raw.activeAccountId : null,
++    }
++  }
++  // v1 迁移：单 auth 变成唯一账号
++  if (raw.auth && typeof raw.auth === 'object') {
++    const id = authStoreId(raw.account, 0)
++    return {
++      schemaVersion: 2,
++      machine: raw.machine && typeof raw.machine === 'object' ? raw.machine : {},
++      accounts: [{ id, auth: raw.auth, account: raw.account ?? {}, addedAt: Date.now() }],
++      activeAccountId: id,
++    }
++  }
++  return { schemaVersion: 2, machine: {}, accounts: [], activeAccountId: null }
++}
++
++const activeAuthAccount = (store) =>
++  store.accounts.find((a) => a.id === store.activeAccountId) ?? store.accounts[0] ?? null
++
++const readAuth = () => {
++  const store = readAuthStore()
++  const active = activeAuthAccount(store)
++  return active
++    ? { machine: store.machine, auth: active.auth, account: active.account, activeAccountId: active.id }
++    : { machine: store.machine, activeAccountId: null }
++}
++
++function writeAuth(v) {
++  const store = readAuthStore()
++  if (v && typeof v === 'object') {
++    if (v.machine && typeof v.machine === 'object') store.machine = v.machine
++    const hasAuth = v.auth && typeof v.auth === 'object' && typeof v.auth.accessToken === 'string' && v.auth.accessToken.length > 0
++    if (!hasAuth) {
++      // logout：删掉当前账号（oauth.js 的 logout 写空对象）；账号表为空则整体清空
++      const active = activeAuthAccount(store)
++      if (active) {
++        store.accounts = store.accounts.filter((a) => a.id !== active.id)
++        store.activeAccountId = store.accounts[0]?.id ?? null
++      }
++      if (store.accounts.length === 0) {
++        writeJson(AUTH_PATH, {})
++        return
++      }
++    } else {
++      const uid = v.account?.uid
++      const existing = store.accounts.find(
++        (a) => (uid && a.account?.uid === uid) || a.id === v.activeAccountId,
++      )
++      if (existing) {
++        existing.auth = v.auth
++        if (v.account && typeof v.account === 'object') existing.account = v.account
++      } else {
++        const id = authStoreId(v.account, store.accounts.length)
++        store.accounts.push({ id, auth: v.auth, account: v.account ?? {}, addedAt: Date.now() })
++        store.activeAccountId = id
++      }
++      if (store.activeAccountId === null && store.accounts.length > 0) store.activeAccountId = store.accounts[0].id
++    }
++  }
++  store.schemaVersion = 2
++  writeJson(AUTH_PATH, store)
++}
++
++/** UI 用的账号列表（不含任何 token）。 */
++function authAccountsView() {
++  const store = readAuthStore()
++  return {
++    activeAccountId: store.activeAccountId,
++    accounts: store.accounts.map((a) => ({
++      id: a.id,
++      nickname: a.account?.nickname || a.account?.email || a.id,
++      uid: a.account?.uid ?? '',
++      expiresAt: a.auth?.expiresAt ?? null,
++      active: a.id === store.activeAccountId,
++    })),
++  }
++}
+ 
+ // ---------------------------------------------------------------------------
+ // 桥端口按运行时宿主 profile 分流（goal docs/goals/bridge-port-host-split.md）。
+@@ -1444,9 +1566,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -65,7 +171,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..39aaf8d49296b5d05f1ccb1feb267b05
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1635,7 +1671,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1635,12 +1766,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -77,7 +183,40 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..39aaf8d49296b5d05f1ccb1feb267b05
                  .catch((err) => sendJSON(response, 502, { ok: false, error: err.message }))
                return
              }
-@@ -1804,7 +1843,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+             if (body?.action === 'oauth-status') {
+-              sendJSON(response, 200, { ok: true, oauth: provider.oauth.oauthStatus() })
++              sendJSON(response, 200, { ok: true, oauth: { ...provider.oauth.oauthStatus(), ...authAccountsView() } })
++              return
++            }
++            if (body?.action === 'account-switch') {
++              const id = typeof body.id === 'string' ? body.id : ''
++              const store = readAuthStore()
++              if (!store.accounts.some((a) => a.id === id)) {
++                sendJSON(response, 404, { ok: false, error: '账号不存在' })
++                return
++              }
++              store.activeAccountId = id
++              writeJson(AUTH_PATH, store)
++              sendJSON(response, 200, { ok: true, oauth: { ...provider.oauth.oauthStatus(), ...authAccountsView() } })
++              return
++            }
++            if (body?.action === 'account-remove') {
++              const id = typeof body.id === 'string' ? body.id : ''
++              const store = readAuthStore()
++              const target = store.accounts.find((a) => a.id === id)
++              if (!target) {
++                sendJSON(response, 404, { ok: false, error: '账号不存在' })
++                return
++              }
++              store.accounts = store.accounts.filter((a) => a.id !== id)
++              if (store.activeAccountId === id) store.activeAccountId = store.accounts[0]?.id ?? null
++              if (store.accounts.length === 0) writeJson(AUTH_PATH, {})
++              else writeJson(AUTH_PATH, store)
++              sendJSON(response, 200, { ok: true, oauth: { ...provider.oauth.oauthStatus(), ...authAccountsView() } })
+               return
+             }
+             if (body?.action === 'model-list') {
+@@ -1804,7 +1965,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -89,7 +228,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..39aaf8d49296b5d05f1ccb1feb267b05
                  .catch((err) => sendJSON(response, 502, { ok: false, error: err.message }))
                return
              }
-@@ -1851,7 +1893,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1851,7 +2015,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -101,6 +240,44 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..39aaf8d49296b5d05f1ccb1feb267b05
                  .catch((err) => sendJSON(response, 502, { ok: false, error: err.message }))
                return
              }
+diff --git a/lib/client.js b/lib/client.js
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0bafcf797d7f2254caafea4274cf5cd274dd802c 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -1152,6 +1152,33 @@ window.__ModuleLoader__.load({
+ 							oauth.accessTokenExpiresAt ? (acct.type ? " · 令牌至 " : "令牌至 ") + fmtTime(oauth.accessTokenExpiresAt) : "")));
+ 					parts.push(createElement("p", { key: "scope", className: "cbc-hint" },
+ 						"此登录覆盖模型对话（主聊天经流式桥统一取凭据）、网络搜索与抓取、生图与额度读数。"));
++					// 多账号：列表 + 切换 + 添加（host 侧 accounts[] 由 writeAuth 归位，
++					// 登录另一个号即新增一条；切换只改 activeAccountId，下次请求生效）。
++					var accts = Array.isArray(oauth.accounts) ? oauth.accounts : [];
++					if (accts.length > 1) {
++						parts.push(createElement("div", { key: "accts", className: "cbc-addrow" },
++							createElement("span", { className: "cbc-muted" }, "账号"),
++							accts.map(function (a) {
++								return createElement(CbcButton, {
++									key: a.id,
++									variant: a.active ? "primary" : "outline",
++									onClick: function () {
++										if (a.active) return;
++										post({ action: "account-switch", id: a.id }).then(function (res) {
++											if (res.ok) reload();
++											else setErr(res.d && res.d.error ? res.d.error : "切换失败（HTTP " + res.status + "）");
++										}).catch(function (e) { setErr(e && e.message ? e.message : "切换失败（网络）"); });
++									},
++								}, (a.nickname || a.id) + (a.active ? " ✓" : ""));
++							})));
++					}
++					parts.push(createElement("div", { key: "addacct", className: "cbc-addrow" },
++						createElement(CbcButton, { variant: "outline", onClick: function () {
++							post({ action: "oauth-start" }).then(function (res) {
++								if (res.ok) reload();
++								else setErr(res.d && res.d.error ? res.d.error : "发起登录失败");
++							}).catch(function (e) { setErr(e && e.message ? e.message : "发起登录失败（网络）"); });
++						} }, "添加账号")));
+ 					parts.push(createElement("div", { key: "out", className: "cbc-addrow" },
+ 						confirmAct === "__logout__"
+ 								? createElement(CbcButton, { variant: "outline", danger: true, onClick: function () {
 diff --git a/providers/codebuddy/index.js b/providers/codebuddy/index.js
 index bccc4815f546c12669e100dfb802cc4638000ea4..88c8ce5aa0402a6640ebf2dc2e07b9b0961606c7 100644
 --- a/providers/codebuddy/index.js
