@@ -66,3 +66,14 @@ cd ~/projects/tools/dsh-tap-patches
 覆盖范围：**响应头阶段**（流已开始的 2xx 不换号）。Qoder 的 `403 + subCode RESOURCE_LIMIT`（排队）也会触发换号重试。
 
 支持通道：CodeBuddy、TraeWork CN。Qoder CN 仍是单账号（其 COSY 签名与设备绑定，改造前需先实测）。
+
+### Qoder 错误文案映射（补丁 7）
+
+dsh 的错误分类器（`dsh-llm-pi-ai` 的 `classifyPiAiError`）对消息文本匹配 `/\b(?:401|403)\b/`，命中即显示「API 密钥无效」。而 Qoder 上游的业务错误（如 `10605 RESOURCE_LIMIT` 排队）外层信封恰好带 `"code":"403"`，于是排队被误报成密钥失效。
+
+`providers/qoder/gateway.js` 新增 `explainUpstreamError()`：递归剥离多层 JSON 信封（实测三层），按 `subCode` 给出真实语义（排队/凭据被拒/其他），且文案**不含 401/403 字面量**，不会被误分类。10605 的典型输出：
+
+```
+Qoder 上游排队中：模型 dfmodel 暂不可用（队列 p3，serviceAvailable=false，约 30s 后重试）。
+这是上游容量/订阅等级限制，与 API 密钥无关；换模型或降档位通常无效。
+```

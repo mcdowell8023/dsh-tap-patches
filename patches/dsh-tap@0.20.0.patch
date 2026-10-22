@@ -640,6 +640,89 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d8504
        // G8 思考强度注入：effortWireFor 只在档位线值非空时返回（off 的线值
        // 是 null = 省略参数；无表模型/非法档位同）。调用方（pi-ai / dsh 核心
        // UI）显式携带 reasoning_effort 时绝不覆盖。
+diff --git a/providers/qoder/gateway.js b/providers/qoder/gateway.js
+index 74600ed07316b5b133f3c6b025129b7163c95d55..c66a9dc221ee9ae9e4181606be08ddffc68921c9 100644
+--- a/providers/qoder/gateway.js
++++ b/providers/qoder/gateway.js
+@@ -143,6 +143,56 @@ export function createQoderEnvelopeParser() {
+  *   getModelPrefs?: () => object, // { [id]: { effort?, contextVariant? } } 出站补默认
+  * }} deps
+  */
++/**
++ * 上游错误 → 可读文案。
++ *
++ * 两个坑一起修（2026-10-22 实测）：
++ * 1. dsh 的错误分类器（dsh-llm-pi-ai 的 classifyPiAiError）对消息文本做
++ *    `/\b(?:401|403)\b/` 匹配，命中即判 AUTH，UI 显示「API 密钥无效」——
++ *    而上游业务错误（如 10605 排队）的 message 里恰好带 `"code":"403"`，
++ *    于是排队被误报成密钥失效。因此本函数的文案**绝不出现 401/403 字面量**。
++ * 2. 上游是双层 JSON 信封：外层 {code,message}，内层 message 又是 JSON
++ *    （{code:"10605",subCode:"RESOURCE_LIMIT",modelKey,queueType,
++ *    retryAfterSeconds,serviceAvailable}）。剥出来后按 subCode 给真实语义。
++ */
++function explainUpstreamError(status, rawText) {
++  // 上游错误是多层 JSON 信封（实测三层）：{code:"403",message:"{code:10605,
++  // message:"{isQueued,modelKey,...}",subCode:RESOURCE_LIMIT}"}。逐层剥开，
++  // 内层字段覆盖外层，最后拿到的就是带真实语义的那层。
++  const layers = []
++  let cur = rawText
++  for (let depth = 0; depth < 4; depth += 1) {
++    let obj = null
++    try {
++      obj = typeof cur === 'string' ? JSON.parse(cur) : cur
++    } catch { break }
++    if (!obj || typeof obj !== 'object') break
++    layers.push(obj)
++    if (typeof obj.message === 'string' && /^\s*[{[]/.test(obj.message)) {
++      cur = obj.message
++      continue
++    }
++    break
++  }
++  const inner = layers.length ? Object.assign({}, ...layers) : null
++  if (inner && typeof inner === 'object') {
++    const sub = inner.subCode ?? ''
++    const code = inner.code ?? ''
++    if (code === '10605' || sub === 'RESOURCE_LIMIT') {
++      const wait = Number.isFinite(inner.retryAfterSeconds) ? inner.retryAfterSeconds : 30
++      return `Qoder 上游排队中：模型 ${inner.modelKey ?? '?'} 暂不可用（队列 ${inner.queueType ?? '?'}，serviceAvailable=${inner.serviceAvailable ?? false}，约 ${wait}s 后重试）。这是上游容量/订阅等级限制，与 API 密钥无关；换模型或降档位通常无效。`
++    }
++    if (sub === 'AUTH' || code === '11102' || code === '11103') {
++      return `Qoder 上游凭据被拒：${inner.msg ?? inner.message ?? sub}——需要重新登录 Qoder 账号。`
++    }
++    if (code || sub) {
++      return `Qoder 上游拒绝（code ${code}${sub ? ' / ' + sub : ''}）：${inner.msg ?? inner.message ?? ''}`.slice(0, 300)
++    }
++  }
++  const text = String(rawText ?? '').replace(/\b(?:401|403)\b/g, 'forbidden').slice(0, 200)
++  return `Qoder 上游拒绝（HTTP ${status}）：${text}`
++}
++
+ export function createQoderGateway(deps) {
+   const limiter = new SessionLimiter()
+   const logPrefix = '[dsh-tap/qoder]'
+@@ -366,7 +416,7 @@ export function createQoderGateway(deps) {
+         const text = await upstreamResp.text().catch(() => '')
+         const status = upstreamResp.status === 401 || upstreamResp.status === 429 ? upstreamResp.status : 502
+         res.writeHead(status, { 'Content-Type': 'application/json' })
+-        res.end(JSON.stringify({ error: { message: `qoder upstream HTTP ${upstreamResp.status}: ${text.slice(0, 200)}`, code: `qoder_${upstreamResp.status}` } }))
++        res.end(JSON.stringify({ error: { message: explainUpstreamError(upstreamResp.status, text), code: `qoder_${upstreamResp.status}` } }))
+         gwLog({ dir: 'err', status: upstreamResp.status, model, ms: Date.now() - t0 })
+         report('error', null)
+         return
+@@ -423,10 +473,10 @@ export function createQoderGateway(deps) {
+               gwLog({ dir: 'err', model, ms: Date.now() - t0, note: 'stream-error-frame', repaired: repairedNote })
+               report('error', null)
+               if (wantStream) {
+-                emitError(`qoder upstream error: ${ev.error}`)
++                emitError(explainUpstreamError(0, ev.error))
+               } else {
+                 res.writeHead(502, { 'Content-Type': 'application/json' })
+-                res.end(JSON.stringify({ error: { message: `qoder upstream error: ${ev.error}`, code: 'qoder_upstream_error' } }))
++                res.end(JSON.stringify({ error: { message: explainUpstreamError(0, ev.error), code: 'qoder_upstream_error' } }))
+               }
+               return
+             }
 diff --git a/providers/trae/index.js b/providers/trae/index.js
 index ea64988a70f5bcf1b60ab61ff1fbaff24505d2cb..2f28de97e90f565186d951feb8b97c917004250e 100644
 --- a/providers/trae/index.js
