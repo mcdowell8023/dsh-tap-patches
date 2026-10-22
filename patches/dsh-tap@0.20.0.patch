@@ -38,7 +38,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b08
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b158259dcf726 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..1f3c8eb9f19f3dc8da883c200075b7b3bab19e4c 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -227,7 +227,130 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b1582
    envKey,
    withKeyRotation: (settings, attempt) => withKeyRotation(settings, attempt),
    resolveCredential: (settings) => resolveCredential(settings),
-@@ -1444,9 +1598,18 @@ function hostReconcileView(webService) {
+@@ -942,8 +1096,110 @@ async function withKeyRotation(settings, attempt) {
+ // 模型，清单永远由镜像独占（无"陈旧遮蔽"问题，纯净态=删镜像路径）。
+ // ---------------------------------------------------------------------------
+ 
+-const readTraeAuth = () => readJson(TRAE_AUTH_PATH)
+-const writeTraeAuth = (v) => writeJson(TRAE_AUTH_PATH, v)
++// Trae 的账号簿：与 CodeBuddy 同款，区别是 device 块（设备身份，含密钥对）
++// 留在顶层由所有账号共享，accounts[] 只装 auth/account。
++const readTraeAuthStore = () => {
++  const raw = readJson(TRAE_AUTH_PATH)
++  if (Array.isArray(raw.accounts)) {
++    return {
++      schemaVersion: 2,
++      device: raw.device && typeof raw.device === 'object' ? raw.device : {},
++      accounts: raw.accounts.filter((a) => a && typeof a === 'object'),
++      activeAccountId: typeof raw.activeAccountId === 'string' ? raw.activeAccountId : null,
++      failedAccounts: raw.failedAccounts && typeof raw.failedAccounts === 'object' ? raw.failedAccounts : {},
++    }
++  }
++  if (raw.auth && typeof raw.auth === 'object' && typeof raw.auth.accessToken === 'string') {
++    const id = (typeof raw.account?.uid === 'string' && raw.account.uid) || 'acc1'
++    return {
++      schemaVersion: 2,
++      device: raw.device && typeof raw.device === 'object' ? raw.device : {},
++      accounts: [{ id, auth: raw.auth, account: raw.account ?? {}, addedAt: Date.now() }],
++      activeAccountId: id,
++      failedAccounts: {},
++    }
++  }
++  return { schemaVersion: 2, device: raw.device && typeof raw.device === 'object' ? raw.device : {}, accounts: [], activeAccountId: null, failedAccounts: {} }
++}
++
++const activeTraeAccount = (store) =>
++  store.accounts.find((a) => a.id === store.activeAccountId) ?? store.accounts[0] ?? null
++
++const readTraeAuth = () => {
++  const store = readTraeAuthStore()
++  const active = activeTraeAccount(store)
++  return active
++    ? { device: store.device, auth: active.auth, account: active.account, activeAccountId: active.id }
++    : { device: store.device, activeAccountId: null }
++}
++
++function writeTraeAuth(v) {
++  const store = readTraeAuthStore()
++  if (v && typeof v === 'object') {
++    if (v.device && typeof v.device === 'object') store.device = v.device
++    const hasAuth = v.auth && typeof v.auth === 'object' && typeof v.auth.accessToken === 'string' && v.auth.accessToken.length > 0
++    if (!hasAuth) {
++      const active = activeTraeAccount(store)
++      if (active) {
++        store.accounts = store.accounts.filter((a) => a.id !== active.id)
++        store.activeAccountId = store.accounts[0]?.id ?? null
++      }
++      if (store.accounts.length === 0) {
++        writeJson(TRAE_AUTH_PATH, store.device && Object.keys(store.device).length ? { device: store.device } : {})
++        return
++      }
++    } else {
++      const uid = v.account?.uid
++      const existing = store.accounts.find((a) => (uid && a.account?.uid === uid) || a.id === v.activeAccountId)
++      if (existing) {
++        existing.auth = v.auth
++        if (v.account && typeof v.account === 'object') existing.account = v.account
++      } else {
++        const id = (uid && uid.length) ? uid : `acc${store.accounts.length + 1}`
++        store.accounts.push({ id, auth: v.auth, account: v.account ?? {}, addedAt: Date.now() })
++        store.activeAccountId = id
++      }
++      if (store.activeAccountId === null && store.accounts.length > 0) store.activeAccountId = store.accounts[0].id
++    }
++  }
++  store.schemaVersion = 2
++  writeJson(TRAE_AUTH_PATH, store)
++}
++
++function traeAccountsView() {
++  const store = readTraeAuthStore()
++  return {
++    activeAccountId: store.activeAccountId,
++    accounts: store.accounts.map((a) => ({
++      id: a.id,
++      nickname: a.account?.nickname || a.account?.email || a.id,
++      uid: a.account?.uid ?? '',
++      expiresAt: a.auth?.expiresAt ?? null,
++      active: a.id === store.activeAccountId,
++    })),
++  }
++}
++
++function setActiveTraeAccount(id) {
++  if (typeof id !== 'string' || !id) return false
++  const store = readTraeAuthStore()
++  if (!store.accounts.some((a) => a.id === id)) return false
++  if (store.activeAccountId !== id) {
++    store.activeAccountId = id
++    store.schemaVersion = 2
++    writeJson(TRAE_AUTH_PATH, store)
++  }
++  return true
++}
++
++function markTraeAccountFailed(id) {
++  if (typeof id !== 'string' || !id) return
++  const store = readTraeAuthStore()
++  if (!store.accounts.some((a) => a.id === id)) return
++  store.failedAccounts = { ...store.failedAccounts, [id]: Date.now() }
++  store.schemaVersion = 2
++  writeJson(TRAE_AUTH_PATH, store)
++}
+ 
+ const traeRuntime = { running: false, port: null, lastError: null }
+ 
+@@ -978,6 +1234,9 @@ let traeSettingsFn = () => ({ traeEnabled: false })
+ const traeProvider = createTraeProvider({
+   readAuth: readTraeAuth,
+   writeAuth: writeTraeAuth,
++  readAuthStore: readTraeAuthStore,
++  setActiveAuthAccount: setActiveTraeAccount,
++  markAuthAccountFailed: markTraeAccountFailed,
+   settings: () => traeSettingsFn(),
+   withCredentials: (attempt) => withTraeCredentials(() => traeSettingsFn(), attempt),
+   meter,
+@@ -1444,9 +1703,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -249,7 +372,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b1582
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1635,12 +1798,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1635,12 +1903,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -294,7 +417,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b1582
                return
              }
              if (body?.action === 'model-list') {
-@@ -1804,7 +1997,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1804,17 +2102,47 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -306,7 +429,46 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b1582
                  .catch((err) => sendJSON(response, 502, { ok: false, error: err.message }))
                return
              }
-@@ -1851,7 +2047,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+             if (body?.action === 'trae-oauth-status') {
+-              sendJSON(response, 200, { ok: true, trae: traeProvider.credentialView() })
++              sendJSON(response, 200, { ok: true, trae: { ...traeProvider.credentialView(), ...traeAccountsView() } })
++              return
++            }
++            if (body?.action === 'trae-account-switch') {
++              const id = typeof body.id === 'string' ? body.id : ''
++              if (!setActiveTraeAccount(id)) {
++                sendJSON(response, 404, { ok: false, error: '账号不存在' })
++                return
++              }
++              sendJSON(response, 200, { ok: true, trae: { ...traeProvider.credentialView(), ...traeAccountsView() } })
++              return
++            }
++            if (body?.action === 'trae-account-remove') {
++              const id = typeof body.id === 'string' ? body.id : ''
++              const store = readTraeAuthStore()
++              if (!store.accounts.some((a) => a.id === id)) {
++                sendJSON(response, 404, { ok: false, error: '账号不存在' })
++                return
++              }
++              store.accounts = store.accounts.filter((a) => a.id !== id)
++              if (store.activeAccountId === id) store.activeAccountId = store.accounts[0]?.id ?? null
++              if (store.accounts.length === 0) {
++                writeJson(TRAE_AUTH_PATH, store.device && Object.keys(store.device).length ? { device: store.device } : {})
++              } else {
++                store.schemaVersion = 2
++                writeJson(TRAE_AUTH_PATH, store)
++              }
++              sendJSON(response, 200, { ok: true, trae: { ...traeProvider.credentialView(), ...traeAccountsView() } })
+               return
+             }
+             if (body?.action === 'trae-oauth-logout') {
+               traeProvider.oauth.logout()
+-              sendJSON(response, 200, { ok: true, trae: traeProvider.credentialView() })
++              sendJSON(response, 200, { ok: true, trae: { ...traeProvider.credentialView(), ...traeAccountsView() } })
+               return
+             }
+             if (body?.action === 'trae-model-sync') {
+@@ -1851,7 +2179,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -319,7 +481,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b1582
                return
              }
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0bafcf797d7f2254caafea4274cf5cd274dd802c 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0ac0cb55aa53892d891398864fbe43feff50105f 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -1152,6 +1152,33 @@ window.__ModuleLoader__.load({
@@ -356,6 +518,40 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0bafcf797d7f2254caafea4274cf5cd2
  					parts.push(createElement("div", { key: "out", className: "cbc-addrow" },
  						confirmAct === "__logout__"
  								? createElement(CbcButton, { variant: "outline", danger: true, onClick: function () {
+@@ -2289,6 +2316,33 @@ window.__ModuleLoader__.load({
+ 							: createElement(CbcButton, { variant: "outline", danger: true, onClick: askTLogout }, "退出登录"))
+ 						: createElement(CbcButton, { variant: "primary", disabled: busy, onClick: startLogin }, busy ? "启动中…" : "登录（浏览器授权）"),
+ 				}),
++				// 多账号：账号切换（多个时显示）+ 添加账号。
++				toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length > 1
++					? createElement("div", { key: "taccts", className: "cbc-addrow" },
++						createElement("span", { className: "cbc-muted" }, "账号"),
++						toauth.accounts.map(function (a) {
++							return createElement(CbcButton, {
++								key: a.id,
++								variant: a.active ? "primary" : "outline",
++								onClick: function () {
++									if (a.active) return;
++									post({ action: "trae-account-switch", id: a.id }).then(function (res) {
++										if (res.ok) reload();
++										else setErr(res.d && res.d.error ? res.d.error : "切换失败（HTTP " + res.status + "）");
++									}).catch(function (e) { setErr(e && e.message ? e.message : "切换失败（网络）"); });
++								},
++							}, (a.nickname || a.id) + (a.active ? " ✓" : ""));
++						}))
++					: null,
++				toauth.signedIn
++					? createElement("div", { key: "taddacct", className: "cbc-addrow" },
++						createElement(CbcButton, { variant: "outline", onClick: function () {
++							post({ action: "trae-oauth-start" }).then(function (res) {
++								if (res.ok) reload();
++								else setErr(res.d && res.d.error ? res.d.error : "发起登录失败");
++							}).catch(function (e) { setErr(e && e.message ? e.message : "发起登录失败（网络）"); });
++						} }, "添加账号"))
++					: null,
+ 				createElement("div", { className: "cbc-row" },
+ 					createElement("div", { className: "cbc-row-label" }, "余额"),
+ 					createElement("div", { className: "cbc-row-control" },
 diff --git a/providers/codebuddy/index.js b/providers/codebuddy/index.js
 index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d85044292ea6d 100644
 --- a/providers/codebuddy/index.js
@@ -444,6 +640,40 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d8504
        // G8 思考强度注入：effortWireFor 只在档位线值非空时返回（off 的线值
        // 是 null = 省略参数；无表模型/非法档位同）。调用方（pi-ai / dsh 核心
        // UI）显式携带 reasoning_effort 时绝不覆盖。
+diff --git a/providers/trae/index.js b/providers/trae/index.js
+index ea64988a70f5bcf1b60ab61ff1fbaff24505d2cb..2f28de97e90f565186d951feb8b97c917004250e 100644
+--- a/providers/trae/index.js
++++ b/providers/trae/index.js
+@@ -105,6 +105,29 @@ export function createTraeProvider(deps) {
+       return oauth.oauthStatus()
+     },
+ 
++    /**
++     * 额度/凭据类拒绝（401/403/429）后的自动切号——与 CodeBuddy 同款串行
++     * 语义：当前账号进 10 分钟冷宫，切到下一个未冷却的账号。
++     */
++    rotateAccountOnQuota() {
++      const store = deps.readAuthStore?.()
++      const accounts = Array.isArray(store?.accounts) ? store.accounts : []
++      if (accounts.length < 2) return false
++      const current = accounts.find((a) => a.id === store.activeAccountId) ?? accounts[0]
++      deps.markAuthAccountFailed?.(current.id)
++      const failed = (store.failedAccounts && typeof store.failedAccounts === 'object' && !Array.isArray(store.failedAccounts))
++        ? store.failedAccounts
++        : {}
++      const from = accounts.indexOf(current)
++      for (let step = 1; step < accounts.length; step += 1) {
++        const cand = accounts[(from + step) % accounts.length]
++        const cooledAt = failed[cand.id]
++        if (typeof cooledAt === 'number' && Date.now() - cooledAt < 10 * 60 * 1000) continue
++        if (deps.setActiveAuthAccount?.(cand.id)) return true
++      }
++      return false
++    },
++
+     /** 双额度池余额只读快照（60s memoize，永不 throw）。 */
+     quota: createTraeQuota({ settings: deps.settings, readAuth: deps.readAuth, oauth }),
+   }
 diff --git a/scripts/trae-model-catalog.mjs b/scripts/trae-model-catalog.mjs
 index c5be74495e125f5fae4065b30302760551b7f90b..a832a2688bc406cd4bec77a0e02ad785410d796f 100644
 --- a/scripts/trae-model-catalog.mjs

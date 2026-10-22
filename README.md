@@ -17,6 +17,7 @@
 | 3 | `index.js` | `readPin()` 兼容读 `config.searchProvider` | dsh 0.2.x 的 WebRuntime 没有 `searchProviderId` 字段，webPin 恒 false，卡片头永远误报「宿主漂移」 |
 | 4 | `scripts/trae-model-catalog.mjs` | `PRODUCT_DIRS` 加 `Trae CN`；新增 darwin 分支 | Trae 的 db 发现只支持 Windows/WSL，macOS 上永远「未发现 state.vscdb」，模型列表为空 |
 | 5 | `index.js` + `lib/client.js` | 凭据账号簿 `accounts[]` + `activeAccountId`，新增 `account-switch` / `account-remove` action 与账号列表 UI | 原先单账号：换号只能退出登录再登录，无法保留多个账号 |
+| 6 | `index.js` + `providers/trae/index.js` | TraeWork CN 同款账号簿（device 块留顶层共享）与切号 | Trae 同样只有单账号 |
 
 ### 多账号（补丁 5）使用说明
 
@@ -63,3 +64,5 @@ cd ~/projects/tools/dsh-tap-patches
 额度/凭据类拒绝（HTTP 401 / 403 / 429）时，bridge 会调用 `rotateAccountOnQuota`：当前账号进 10 分钟冷宫，切到下一个未冷却的账号，重试一次。冷宫过期后自动恢复。账号少于两个、或全在冷宫中时，按原错误返回（不会盲目换号）。
 
 覆盖范围：**响应头阶段**（流已开始的 2xx 不换号）。Qoder 的 `403 + subCode RESOURCE_LIMIT`（排队）也会触发换号重试。
+
+支持通道：CodeBuddy、TraeWork CN。Qoder CN 仍是单账号（其 COSY 签名与设备绑定，改造前需先实测）。
