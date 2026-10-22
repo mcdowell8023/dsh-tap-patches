@@ -1,5 +1,44 @@
+diff --git a/core/bridge.js b/core/bridge.js
+index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b081d242c95 100644
+--- a/core/bridge.js
++++ b/core/bridge.js
+@@ -507,7 +507,7 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+       // long SSE stream is unaffected. Per attempt, so a failover retry gets
+       // its own window.
+       const firstByteMs = Number(s.upstreamFirstByteTimeoutMs) > 0 ? Number(s.upstreamFirstByteTimeoutMs) : 45_000
+-      const { cred, res: upstream0, err } = await withCredentials((c) => {
++      const runAttempt = () => withCredentials((c) => {
+         outHeaders.Authorization = c.authorization
+         for (const name of credHeaderNames) delete outHeaders[name]
+         credHeaderNames = Object.keys(c.headers ?? {})
+@@ -526,6 +526,25 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+           signal: AbortSignal.any([clientAbort.signal, attemptAbort.signal]),
+         }).finally(() => clearTimeout(firstByteTimer))
+       })
++      let { cred, res: upstream0, err } = await runAttempt()
++      // 自动切号重试：上游以额度/凭据类状态拒绝（401 凭据失效 / 403 额度或
++      // 排队 / 429 限流）且 provider 提供 rotateAccountOnQuota 时，把当前账号
++      // 打进冷宫、切到下一个账号再试一次。只重试一次；流已开始的 2xx 不进这
++      // 里（响应头阶段才谈得上换号）。
++      if (upstream0 && upstream0.ok === false && (upstream0.status === 401 || upstream0.status === 403 || upstream0.status === 429)) {
++        const rotated = typeof provider.rotateAccountOnQuota === 'function'
++          ? provider.rotateAccountOnQuota()
++          : false
++        if (rotated) {
++          logOut({ waitMs, rotated: true })
++          const retry = await runAttempt()
++          if (retry.cred) {
++            cred = retry.cred
++            upstream0 = retry.res
++            err = retry.err
++          }
++        }
++      }
+       if (!cred || err) {
+         if (err?.clientDisconnected === true) {
+           // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e56aeaed7 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..8dab4a6ec3bf4bdde1961e13c97b158259dcf726 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -43,7 +82,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e
  import { createHostConfigLayer } from './host-config.js'
  import arkProvider from './providers/ark/index.js'
  import bailianProvider from './providers/bailian/index.js'
-@@ -244,8 +271,103 @@ function validateBaseURL(value) {
+@@ -244,8 +271,132 @@ function validateBaseURL(value) {
  
  const readFileLayer = () => readJson(SETTINGS_PATH)
  const writeFileLayer = (section) => writeJson(SETTINGS_PATH, section)
@@ -146,10 +185,49 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e
 +    })),
 +  }
 +}
++
++/** 切换 active 账号；id 不存在返回 false。 */
++function setActiveAuthAccount(id) {
++  if (typeof id !== 'string' || !id) return false
++  const store = readAuthStore()
++  if (!store.accounts.some((a) => a.id === id)) return false
++  if (store.activeAccountId !== id) {
++    store.activeAccountId = id
++    store.schemaVersion = 2
++    writeJson(AUTH_PATH, store)
++  }
++  return true
++}
++
++/** 失败账号冷却：额度/凭据类拒绝后把当前账号打进冷宫，rotateAccountOnQuota 会跳过它。 */
++const AUTH_FAILED_COOLDOWN_MS = 10 * 60 * 1000
++
++function markAuthAccountFailed(id) {
++  if (typeof id !== 'string' || !id) return
++  const store = readAuthStore()
++  if (!store.accounts.some((a) => a.id === id)) return
++  const failed = (store.failedAccounts && typeof store.failedAccounts === 'object' && !Array.isArray(store.failedAccounts))
++    ? { ...store.failedAccounts }
++    : {}
++  failed[id] = Date.now()
++  store.failedAccounts = failed
++  store.schemaVersion = 2
++  writeJson(AUTH_PATH, store)
++}
  
  // ---------------------------------------------------------------------------
  // 桥端口按运行时宿主 profile 分流（goal docs/goals/bridge-port-host-split.md）。
-@@ -1444,9 +1566,18 @@ function hostReconcileView(webService) {
+@@ -870,6 +1021,9 @@ const provider = createCodeBuddyProvider({
+   meter,
+   readAuth,
+   writeAuth,
++  readAuthStore,
++  setActiveAuthAccount,
++  markAuthAccountFailed,
+   envKey,
+   withKeyRotation: (settings, attempt) => withKeyRotation(settings, attempt),
+   resolveCredential: (settings) => resolveCredential(settings),
+@@ -1444,9 +1598,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -171,7 +249,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1635,12 +1766,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1635,12 +1798,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -216,7 +294,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e
                return
              }
              if (body?.action === 'model-list') {
-@@ -1804,7 +1965,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1804,7 +1997,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -228,7 +306,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..3f5c3bf24b3e141328c73e98a804935e
                  .catch((err) => sendJSON(response, 502, { ok: false, error: err.message }))
                return
              }
-@@ -1851,7 +2015,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1851,7 +2047,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -279,7 +357,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0bafcf797d7f2254caafea4274cf5cd2
  						confirmAct === "__logout__"
  								? createElement(CbcButton, { variant: "outline", danger: true, onClick: function () {
 diff --git a/providers/codebuddy/index.js b/providers/codebuddy/index.js
-index bccc4815f546c12669e100dfb802cc4638000ea4..88c8ce5aa0402a6640ebf2dc2e07b9b0961606c7 100644
+index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d85044292ea6d 100644
 --- a/providers/codebuddy/index.js
 +++ b/providers/codebuddy/index.js
 @@ -31,6 +31,37 @@ const LOG_HEADER_NAMES = [
@@ -320,7 +398,41 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..88c8ce5aa0402a6640ebf2dc2e07b9b0
  /**
   * @param {{
   *   meter: { record: Function },
-@@ -80,6 +111,11 @@ export function createCodeBuddyProvider(deps) {
+@@ -65,6 +96,33 @@ export function createCodeBuddyProvider(deps) {
+     /** 桥出站静态头组（逐字段规则/迷信判定见 headers.js 文件头）。 */
+     bridgeHeaders: () => ({ ...CLIENT_HEADERS }),
+ 
++    /**
++     * 额度/凭据类拒绝（401/403/429）后的自动切号。
++     *
++     * 串行语义：同一时刻只有 active 一个账号在跑；请求被上游以额度/凭据类
++     * 状态拒绝时，bridge 调一次本钩子——当前账号进 10 分钟冷宫，切到下一个
++     * 未冷却的账号并返回 true（调用方重试一次）。账号少于两个或全在冷宫
++     * 返回 false（调用方按原错误返回）。
++     */
++    rotateAccountOnQuota() {
++      const store = deps.readAuthStore?.()
++      const accounts = Array.isArray(store?.accounts) ? store.accounts : []
++      if (accounts.length < 2) return false
++      const current = accounts.find((a) => a.id === store.activeAccountId) ?? accounts[0]
++      deps.markAuthAccountFailed?.(current.id)
++      const failed = (store.failedAccounts && typeof store.failedAccounts === 'object' && !Array.isArray(store.failedAccounts))
++        ? store.failedAccounts
++        : {}
++      const from = accounts.indexOf(current)
++      for (let step = 1; step < accounts.length; step += 1) {
++        const cand = accounts[(from + step) % accounts.length]
++        const cooledAt = failed[cand.id]
++        if (typeof cooledAt === 'number' && Date.now() - cooledAt < 10 * 60 * 1000) continue
++        if (deps.setActiveAuthAccount?.(cand.id)) return true
++      }
++      return false
++    },
++
+     /**
+      * Chat 出站重写：developer → system。
+      *
+@@ -80,6 +138,11 @@ export function createCodeBuddyProvider(deps) {
            if (m?.role === 'developer') m.role = 'system'
          }
        }

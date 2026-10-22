@@ -24,7 +24,7 @@
 - **添加账号**：CodeBuddy 卡片里点「添加账号」→ 浏览器授权另一个号 → 登录成功后自动成为新条目并切为当前。
 - **切换**：账号多于一个时，卡片上出现账号按钮，点一下即切（只改 `activeAccountId`，下一次请求生效，不需要重启）。
 - **删除**：`account-remove`（UI 第二版补按钮），删除当前账号后自动切到剩下的第一个。
-- 自动切号（额度耗尽时自动跳到下一个）尚未实现，当前是手动切换。
+- 自动切号：见下方「自动切号」节。
 
 另外两个不是包内补丁：
 
@@ -57,3 +57,9 @@ cd ~/projects/tools/dsh-tap-patches
 
 - 排障记录：`~/KnowledgeBase/Wiki/entities/pattern/DSH-接入CodeBuddy的三类故障与排查手法.md`
 - 上游 issue：<https://github.com/taikaikaikai-pixel/dsh-tap/issues/4>
+
+### 自动切号（补丁 5 续）
+
+额度/凭据类拒绝（HTTP 401 / 403 / 429）时，bridge 会调用 `rotateAccountOnQuota`：当前账号进 10 分钟冷宫，切到下一个未冷却的账号，重试一次。冷宫过期后自动恢复。账号少于两个、或全在冷宫中时，按原错误返回（不会盲目换号）。
+
+覆盖范围：**响应头阶段**（流已开始的 2xx 不换号）。Qoder 的 `403 + subCode RESOURCE_LIMIT`（排队）也会触发换号重试。
