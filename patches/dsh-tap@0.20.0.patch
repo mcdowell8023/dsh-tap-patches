@@ -38,7 +38,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b08
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..1f3c8eb9f19f3dc8da883c200075b7b3bab19e4c 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c9096349f13fcfd 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -372,6 +372,23 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..1f3c8eb9f19f3dc8da883c200075b7b3
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
+@@ -1495,14 +1763,14 @@ function settingsView(resolveNow) {
+     // The raw file layer carries plaintext apiKeys[].key — never ship it to
+     // the browser (the card only checks top-level field presence).
+     user: maskedUserLayer(user),
+-    oauth: provider.oauth.oauthStatus(),
++    oauth: { ...provider.oauth.oauthStatus(), ...authAccountsView() },
+     bridge: {
+       running: bridgeRuntime.running,
+       port: bridgeRuntime.port,
+       lastError: bridgeRuntime.lastError,
+     },
+     trae: {
+-      oauth: traeProvider.credentialView(),
++      oauth: { ...traeProvider.credentialView(), ...traeAccountsView() },
+       bridge: {
+         running: traeRuntime.running,
+         port: traeRuntime.port,
 @@ -1635,12 +1903,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
