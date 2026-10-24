@@ -498,13 +498,23 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
                return
              }
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..ac49da2b2b6975ab01c044af6315dd6d90cde0f9 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..b89938531a98a84342fb5472954aa6777250c9cb 100644
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -1152,6 +1152,39 @@ window.__ModuleLoader__.load({
+@@ -1152,16 +1152,57 @@ window.__ModuleLoader__.load({
  							oauth.accessTokenExpiresAt ? (acct.type ? " · 令牌至 " : "令牌至 ") + fmtTime(oauth.accessTokenExpiresAt) : "")));
  					parts.push(createElement("p", { key: "scope", className: "cbc-hint" },
  						"此登录覆盖模型对话（主聊天经流式桥统一取凭据）、网络搜索与抓取、生图与额度读数。"));
+-					parts.push(createElement("div", { key: "out", className: "cbc-addrow" },
+-						confirmAct === "__logout__"
+-								? createElement(CbcButton, { variant: "outline", danger: true, onClick: function () {
+-									clearConfirm();
+-									post({ action: "oauth-logout" }).then(function (res) {
+-										if (res.ok) reload();
+-										else setErr(res.d && res.d.error ? res.d.error : "退出失败（HTTP " + res.status + "）");
+-									}).catch(function (e) { setErr(e && e.message ? e.message : "退出失败（网络）"); });
+-								} }, "确认退出")
+-							: createElement(CbcButton, { variant: "outline", danger: true, onClick: function () { askConfirm("__logout__"); } }, "退出登录")));
 +					// 多账号：账号切换（多个时显示）+ 添加账号。单账号时也显示
 +					// 当前账号名——否则用户看不到多账号功能的存在（2026-10-23
 +					// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
@@ -516,6 +526,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..ac49da2b2b6975ab01c044af6315dd6d
 +								return createElement(CbcButton, {
 +									key: a.id,
 +									variant: a.active ? "primary" : "outline",
++									title: "令牌至 " + (a.expiresAt ? fmtTime(a.expiresAt) : "未知") + (a.active ? (oauth.needsRelogin ? "（需重新登录）" : "") : ""),
 +									onClick: function () {
 +										if (a.active) return;
 +										post({ action: "account-switch", id: a.id }).then(function (res) {
@@ -523,12 +534,12 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..ac49da2b2b6975ab01c044af6315dd6d
 +											else setErr(res.d && res.d.error ? res.d.error : "切换失败（HTTP " + res.status + "）");
 +										}).catch(function (e) { setErr(e && e.message ? e.message : "切换失败（网络）"); });
 +									},
-+								}, (a.nickname || a.id) + (a.active ? " ✓" : ""));
++								}, (a.nickname || a.id) + (a.active ? " ✓" : "") + (a.active && oauth.needsRelogin ? "（需重登）" : ""));
 +							})));
 +					} else if (accts.length === 1) {
 +						parts.push(createElement("div", { key: "accts1", className: "cbc-addrow" },
 +							createElement("span", { className: "cbc-muted" }, "账号"),
-+							createElement("span", { className: "cbc-cell-name" }, accts[0].nickname || accts[0].id)));
++							createElement("span", { className: "cbc-cell-name", title: "令牌至 " + (accts[0].expiresAt ? fmtTime(accts[0].expiresAt) : "未知") + (oauth.needsRelogin ? "（需重新登录）" : "") }, accts[0].nickname || accts[0].id)));
 +					}
 +					parts.push(createElement("div", { key: "addacct", className: "cbc-addrow" },
 +						createElement("span", { className: "cbc-muted" }, accts.length > 1 ? "添加账号（新号自动成为当前）" : "添加第二个账号"),
@@ -538,37 +549,77 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..ac49da2b2b6975ab01c044af6315dd6d
 +								else setErr(res.d && res.d.error ? res.d.error : "发起登录失败");
 +							}).catch(function (e) { setErr(e && e.message ? e.message : "发起登录失败（网络）"); });
 +						} }, "添加账号")));
- 					parts.push(createElement("div", { key: "out", className: "cbc-addrow" },
- 						confirmAct === "__logout__"
- 								? createElement(CbcButton, { variant: "outline", danger: true, onClick: function () {
-@@ -2289,6 +2322,41 @@ window.__ModuleLoader__.load({
- 							: createElement(CbcButton, { variant: "outline", danger: true, onClick: askTLogout }, "退出登录"))
- 						: createElement(CbcButton, { variant: "primary", disabled: busy, onClick: startLogin }, busy ? "启动中…" : "登录（浏览器授权）"),
++				// 退出登录：确认态文案点名当前账号（多账号下"退出"退出的是
++				// active 那个，2026-10-24 反馈：用户分不清退出的到底是谁），
++				// 并带上令牌状态与重新登录的引导。
++				var logoutWho = (acct.nickname || acct.uid || "当前账号");
++				var logoutHint = oauth.needsRelogin
++					? "（该账号凭据已失效，需要重新登录）"
++					: (oauth.accessTokenExpiresAt ? "（令牌至 " + fmtTime(oauth.accessTokenExpiresAt) + "）" : "");
++				parts.push(createElement("div", { key: "out", className: "cbc-addrow" },
++					confirmAct === "__logout__"
++							? createElement(CbcButton, { variant: "outline", danger: true, title: "退出「" + logoutWho + "」" + logoutHint + "，退出后点「登录 CodeBuddy 账号」重新授权", onClick: function () {
++								clearConfirm();
++								post({ action: "oauth-logout" }).then(function (res) {
++									if (res.ok) reload();
++									else setErr(res.d && res.d.error ? res.d.error : "退出失败（HTTP " + res.status + "）");
++								}).catch(function (e) { setErr(e && e.message ? e.message : "退出失败（网络）"); });
++							} }, "确认退出「" + logoutWho + "」")
++						: createElement(CbcButton, { variant: "outline", danger: true, title: "退出当前账号「" + logoutWho + "」" + logoutHint + "，退出后可重新登录", onClick: function () { askConfirm("__logout__"); } }, "退出登录")));
+ 				} else if (oauth.pending) {
+ 					parts.push(createElement("p", { key: "pend", className: "cbc-status" }, "等待浏览器完成登录…（3 秒轮询，完成后自动刷新）"));
+ 					parts.push(createElement("div", { key: "url", className: "cbc-addrow" },
+@@ -2215,6 +2256,8 @@ window.__ModuleLoader__.load({
+ 			};
+ 
+ 			var account = toauth.account;
++			// 退出确认点名当前账号（多账号下"退出"退的是 active 那个）。
++			var tLogoutWho = (account && (account.nickname || account.uid)) || "当前账号";
+ 			var loginStatus = toauth.pending
+ 				? { tone: "warn", text: "登录进行中：浏览器完成授权后会自动回调本机（10 分钟内有效）。" }
+ 				: toauth.signedIn
+@@ -2282,13 +2325,49 @@ window.__ModuleLoader__.load({
+ 				// 「启用通道」开关已上移到区块头（唯一落点）：网关运行态由区块头状态行承载。
+ 				createElement("p", { className: "cbc-group-title" }, "凭据"),
+ 				createElement(ChannelLoginRow, {
+-					label: "Trae 登录", status: loginStatus,
+-					button: toauth.signedIn
+-						? (tLogoutConfirm
+-							? createElement(CbcButton, { variant: "outline", danger: true, onClick: doTLogout }, "确认退出")
+-							: createElement(CbcButton, { variant: "outline", danger: true, onClick: askTLogout }, "退出登录"))
+-						: createElement(CbcButton, { variant: "primary", disabled: busy, onClick: startLogin }, busy ? "启动中…" : "登录（浏览器授权）"),
++				label: "Trae 登录", status: loginStatus,
++				button: toauth.signedIn
++					? (tLogoutConfirm
++						? createElement(CbcButton, { variant: "outline", danger: true, title: "退出「" + tLogoutWho + "」，退出后点「登录（浏览器授权）」重新授权", onClick: doTLogout }, "确认退出「" + tLogoutWho + "」")
++						: createElement(CbcButton, { variant: "outline", danger: true, title: "退出当前账号「" + tLogoutWho + "」，退出后可重新登录", onClick: askTLogout }, "退出登录"))
++					: createElement(CbcButton, { variant: "primary", disabled: busy, onClick: startLogin }, busy ? "启动中…" : "登录（浏览器授权）"),
  				}),
-+				// 多账号：账号切换（多个时显示）+ 添加账号。单账号时也显示
-+				// 当前账号名——否则用户看不到多账号功能的存在（2026-10-23
-+				// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
-+				toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length > 1
-+					? createElement("div", { key: "taccts", className: "cbc-addrow" },
-+						createElement("span", { className: "cbc-muted" }, "账号"),
-+						toauth.accounts.map(function (a) {
-+							return createElement(CbcButton, {
-+								key: a.id,
-+								variant: a.active ? "primary" : "outline",
-+								onClick: function () {
-+									if (a.active) return;
-+									post({ action: "trae-account-switch", id: a.id }).then(function (res) {
-+										if (res.ok) reload();
-+										else setErr(res.d && res.d.error ? res.d.error : "切换失败（HTTP " + res.status + "）");
-+									}).catch(function (e) { setErr(e && e.message ? e.message : "切换失败（网络）"); });
-+								},
-+							}, (a.nickname || a.id) + (a.active ? " ✓" : ""));
-+						}))
-+					: toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length === 1
-+						? createElement("div", { key: "taccts1", className: "cbc-addrow" },
++					// 多账号：账号切换（多个时显示）+ 添加账号。单账号时也显示
++					// 当前账号名——否则用户看不到多账号功能的存在（2026-10-23
++					// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
++					toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length > 1
++						? createElement("div", { key: "taccts", className: "cbc-addrow" },
 +							createElement("span", { className: "cbc-muted" }, "账号"),
-+							createElement("span", { className: "cbc-cell-name" }, toauth.accounts[0].nickname || toauth.accounts[0].id))
-+						: null,
++							toauth.accounts.map(function (a) {
++								return createElement(CbcButton, {
++									key: a.id,
++									variant: a.active ? "primary" : "outline",
++									title: "令牌至 " + (a.expiresAt ? fmtTime(a.expiresAt) : "未知") + (a.active && toauth.needsRelogin ? "（需重新登录）" : ""),
++									onClick: function () {
++										if (a.active) return;
++										post({ action: "trae-account-switch", id: a.id }).then(function (res) {
++											if (res.ok) reload();
++											else setErr(res.d && res.d.error ? res.d.error : "切换失败（HTTP " + res.status + "）");
++										}).catch(function (e) { setErr(e && e.message ? e.message : "切换失败（网络）"); });
++									},
++								}, (a.nickname || a.id) + (a.active ? " ✓" : "") + (a.active && toauth.needsRelogin ? "（需重登）" : ""));
++							}))
++						: toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length === 1
++							? createElement("div", { key: "taccts1", className: "cbc-addrow" },
++								createElement("span", { className: "cbc-muted" }, "账号"),
++								createElement("span", { className: "cbc-cell-name", title: "令牌至 " + (toauth.accounts[0].expiresAt ? fmtTime(toauth.accounts[0].expiresAt) : "未知") + (toauth.needsRelogin ? "（需重新登录）" : "") }, toauth.accounts[0].nickname || toauth.accounts[0].id))
++							: null,
 +				toauth.signedIn
 +					? createElement("div", { key: "taddacct", className: "cbc-addrow" },
 +						createElement("span", { className: "cbc-muted" },
