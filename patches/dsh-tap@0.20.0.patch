@@ -38,7 +38,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b08
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c9096349f13fcfd 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072dc219f3a 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -227,36 +227,45 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
    envKey,
    withKeyRotation: (settings, attempt) => withKeyRotation(settings, attempt),
    resolveCredential: (settings) => resolveCredential(settings),
-@@ -942,8 +1096,110 @@ async function withKeyRotation(settings, attempt) {
+@@ -942,8 +1096,150 @@ async function withKeyRotation(settings, attempt) {
  // 模型，清单永远由镜像独占（无"陈旧遮蔽"问题，纯净态=删镜像路径）。
  // ---------------------------------------------------------------------------
  
 -const readTraeAuth = () => readJson(TRAE_AUTH_PATH)
 -const writeTraeAuth = (v) => writeJson(TRAE_AUTH_PATH, v)
-+// Trae 的账号簿：与 CodeBuddy 同款，区别是 device 块（设备身份，含密钥对）
-+// 留在顶层由所有账号共享，accounts[] 只装 auth/account。
++// Trae 的账号簿：accounts[] 每账号一条（auth/account），devices[] 每账号
++// 一台设备身份（含 P-256 密钥对）。2026-10-24 起 device 按账号独立——Trae
++// 设备流 OAuth 把 DeviceInfo 与授权账号绑定，多账号共用一台设备会互顶令牌
++// （用户实测"一个账号顶一个账号"；原 logout 注释亦写明设备与账号绑定）。
++// schemaVersion 3 = 每账号独立 device；2/1 = 顶层共享（读时迁移给第一个账号）。
 +const readTraeAuthStore = () => {
 +  const raw = readJson(TRAE_AUTH_PATH)
++  const devicesOf = (d) => (d && typeof d === 'object' && !Array.isArray(d)) ? { ...d } : {}
 +  if (Array.isArray(raw.accounts)) {
-+    return {
-+      schemaVersion: 2,
-+      device: raw.device && typeof raw.device === 'object' ? raw.device : {},
++    const store = {
++      schemaVersion: 3,
++      devices: devicesOf(raw.devices),
 +      accounts: raw.accounts.filter((a) => a && typeof a === 'object'),
 +      activeAccountId: typeof raw.activeAccountId === 'string' ? raw.activeAccountId : null,
 +      failedAccounts: raw.failedAccounts && typeof raw.failedAccounts === 'object' ? raw.failedAccounts : {},
 +    }
++    // v2/v1 迁移：顶层共享 device 挂到第一个账号名下（它只被那个账号用过）。
++    if (raw.device && typeof raw.device === 'object' && Object.keys(store.devices).length === 0 && store.accounts[0]) {
++      store.devices[store.accounts[0].id] = raw.device
++    }
++    return store
 +  }
 +  if (raw.auth && typeof raw.auth === 'object' && typeof raw.auth.accessToken === 'string') {
 +    const id = (typeof raw.account?.uid === 'string' && raw.account.uid) || 'acc1'
 +    return {
-+      schemaVersion: 2,
-+      device: raw.device && typeof raw.device === 'object' ? raw.device : {},
++      schemaVersion: 3,
++      devices: raw.device && typeof raw.device === 'object' ? { [id]: raw.device } : {},
 +      accounts: [{ id, auth: raw.auth, account: raw.account ?? {}, addedAt: Date.now() }],
 +      activeAccountId: id,
 +      failedAccounts: {},
 +    }
 +  }
-+  return { schemaVersion: 2, device: raw.device && typeof raw.device === 'object' ? raw.device : {}, accounts: [], activeAccountId: null, failedAccounts: {} }
++  return { schemaVersion: 3, devices: {}, accounts: [], activeAccountId: null, failedAccounts: {} }
 +}
 +
 +const activeTraeAccount = (store) =>
@@ -265,41 +274,72 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
 +const readTraeAuth = () => {
 +  const store = readTraeAuthStore()
 +  const active = activeTraeAccount(store)
++  // device = 当前账号自己的那台；devices 透传给 oauth.js 的 ensureDevice
++  //（它按 key 查表，缺了才生成）。
 +  return active
-+    ? { device: store.device, auth: active.auth, account: active.account, activeAccountId: active.id }
-+    : { device: store.device, activeAccountId: null }
++    ? {
++        device: store.devices[active.id] ?? null,
++        devices: store.devices,
++        auth: active.auth,
++        account: active.account,
++        activeAccountId: active.id,
++      }
++    : { device: null, devices: store.devices, activeAccountId: null }
 +}
 +
 +function writeTraeAuth(v) {
 +  const store = readTraeAuthStore()
 +  if (v && typeof v === 'object') {
-+    if (v.device && typeof v.device === 'object') store.device = v.device
++    // ensureDevice / setSignatureFormat / logout 的整 store 写回：devices 合并、
++    // device 归到当前账号名下。
++    if (v.devices && typeof v.devices === 'object' && !Array.isArray(v.devices)) {
++      store.devices = { ...store.devices, ...v.devices }
++    }
++    if (v.device && typeof v.device === 'object') {
++      const targetId = store.activeAccountId ?? store.accounts[0]?.id
++      if (targetId) store.devices[targetId] = v.device
++    }
 +    const hasAuth = v.auth && typeof v.auth === 'object' && typeof v.auth.accessToken === 'string' && v.auth.accessToken.length > 0
 +    if (!hasAuth) {
++      // logout / account-remove：删当前账号条目，devices 整体保留（设备与账号
++      // 绑定，删账号不删设备——重授权同账号时 Trae 仍认这台机器）。
 +      const active = activeTraeAccount(store)
 +      if (active) {
 +        store.accounts = store.accounts.filter((a) => a.id !== active.id)
 +        store.activeAccountId = store.accounts[0]?.id ?? null
 +      }
 +      if (store.accounts.length === 0) {
-+        writeJson(TRAE_AUTH_PATH, store.device && Object.keys(store.device).length ? { device: store.device } : {})
++        writeJson(TRAE_AUTH_PATH, { schemaVersion: 3, devices: store.devices, accounts: [], activeAccountId: null, failedAccounts: {} })
 +        return
 +      }
 +    } else {
 +      const uid = v.account?.uid
-+      const existing = store.accounts.find((a) => (uid && a.account?.uid === uid) || a.id === v.activeAccountId)
++      // 登录新号走 __newDevice（startOAuth 回调）：只按 uid 匹配——绝不能用
++      // activeAccountId 匹配，否则第二个号登录会把当前账号的令牌覆盖掉
++      // （2026-10-24 单测实测的"存储层顶号"：accounts 不增、旧号令牌被换）。
++      // refresh 写回（无 __newDevice）保持 uid 或 active 双匹配。
++      const isLoginFlow = Boolean(v.__newDevice)
++      const existing = store.accounts.find((a) =>
++        (uid && a.account?.uid === uid) || (!isLoginFlow && a.id === v.activeAccountId))
 +      if (existing) {
 +        existing.auth = v.auth
 +        if (v.account && typeof v.account === 'object') existing.account = v.account
++        // 登录态刷新时顺带更新该账号设备（__newDevice 幂等落地）。
++        if (v.__newDevice) store.devices[existing.id] = v.__newDevice
 +      } else {
 +        const id = (uid && uid.length) ? uid : `acc${store.accounts.length + 1}`
 +        store.accounts.push({ id, auth: v.auth, account: v.account ?? {}, addedAt: Date.now() })
 +        store.activeAccountId = id
++        // 新账号：把本次登录用的 __pending__ 设备转移过来，并清掉临时键。
++        if (v.__newDevice) {
++          store.devices[id] = v.__newDevice
++          delete store.devices.__pending__
++        }
 +      }
 +      if (store.activeAccountId === null && store.accounts.length > 0) store.activeAccountId = store.accounts[0].id
 +    }
 +  }
-+  store.schemaVersion = 2
++  store.schemaVersion = 3
 +  writeJson(TRAE_AUTH_PATH, store)
 +}
 +
@@ -340,7 +380,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
  
  const traeRuntime = { running: false, port: null, lastError: null }
  
-@@ -978,6 +1234,9 @@ let traeSettingsFn = () => ({ traeEnabled: false })
+@@ -978,6 +1274,9 @@ let traeSettingsFn = () => ({ traeEnabled: false })
  const traeProvider = createTraeProvider({
    readAuth: readTraeAuth,
    writeAuth: writeTraeAuth,
@@ -350,7 +390,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
    settings: () => traeSettingsFn(),
    withCredentials: (attempt) => withTraeCredentials(() => traeSettingsFn(), attempt),
    meter,
-@@ -1444,9 +1703,18 @@ function hostReconcileView(webService) {
+@@ -1444,9 +1743,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -372,7 +412,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1495,14 +1763,14 @@ function settingsView(resolveNow) {
+@@ -1495,14 +1803,14 @@ function settingsView(resolveNow) {
      // The raw file layer carries plaintext apiKeys[].key — never ship it to
      // the browser (the card only checks top-level field presence).
      user: maskedUserLayer(user),
@@ -389,7 +429,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
        bridge: {
          running: traeRuntime.running,
          port: traeRuntime.port,
-@@ -1635,12 +1903,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1635,12 +1943,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -434,7 +474,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
                return
              }
              if (body?.action === 'model-list') {
-@@ -1804,17 +2102,47 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1804,17 +2142,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -469,12 +509,9 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
 +              }
 +              store.accounts = store.accounts.filter((a) => a.id !== id)
 +              if (store.activeAccountId === id) store.activeAccountId = store.accounts[0]?.id ?? null
-+              if (store.accounts.length === 0) {
-+                writeJson(TRAE_AUTH_PATH, store.device && Object.keys(store.device).length ? { device: store.device } : {})
-+              } else {
-+                store.schemaVersion = 2
-+                writeJson(TRAE_AUTH_PATH, store)
-+              }
++              // devices 整体保留（设备与账号绑定语义；删账号不删设备）。
++              store.schemaVersion = 3
++              writeJson(TRAE_AUTH_PATH, store)
 +              sendJSON(response, 200, { ok: true, trae: { ...traeProvider.credentialView(), ...traeAccountsView() } })
                return
              }
@@ -485,7 +522,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
                return
              }
              if (body?.action === 'trae-model-sync') {
-@@ -1851,7 +2179,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1851,7 +2216,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -839,6 +876,99 @@ index ea64988a70f5bcf1b60ab61ff1fbaff24505d2cb..2f28de97e90f565186d951feb8b97c91
      /** 双额度池余额只读快照（60s memoize，永不 throw）。 */
      quota: createTraeQuota({ settings: deps.settings, readAuth: deps.readAuth, oauth }),
    }
+diff --git a/providers/trae/oauth.js b/providers/trae/oauth.js
+index 57161ecc2b70fdbbe881566eab342b569b44d6ac..8e76eb6145022de870481164f7ea8eae20075035 100644
+--- a/providers/trae/oauth.js
++++ b/providers/trae/oauth.js
+@@ -109,9 +109,25 @@ export function createTraeOAuth({ readAuth, writeAuth }) {
+   let storeGeneration = 0
+   const pending = { active: false, authUrl: '', error: '' , closeServer: null }
+ 
+-  /** 首次使用时生成并持久化设备身份 + P-256 密钥对（幂等）。 */
+-  function ensureDevice(store) {
+-    if (store.device?.privateKeyPem && store.device?.clientId) return store.device
++  /**
++   * 按账号 key 取设备身份，没有则生成并持久化（幂等）。
++   *
++   * 2026-10-24：device 从「全局共享一个」改为「每账号一个」。Trae 的设备流
++   * OAuth 把 DeviceInfo 与授权账号绑定（原作者 logout 注释即写明"设备身份
++   * 与该账号的设备注册绑定"）——多账号共用同一 device 时，授权第二个号会
++   * 把第一个号的令牌顶掉（用户实测"一个账号顶一个账号"）。
++   *
++   * key 约定：
++   *   '<accountId>'  已有账号（refresh/签名/状态用 active 账号的）
++   *   '__pending__'  登录中：授权回调成功后由组合根 writeAuth 把该 device
++   *                  转移到新账号 id 下（__newDevice 字段）。
++   */
++  function ensureDevice(store, key) {
++    const devices = store.devices && typeof store.devices === 'object' && !Array.isArray(store.devices)
++      ? store.devices
++      : {}
++    const own = devices[key]
++    if (own?.privateKeyPem && own?.clientId) return own
+     const { publicKey, privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' })
+     const device = {
+       clientId: CLIENT_ID_SOLO_LITE,
+@@ -131,8 +147,8 @@ export function createTraeOAuth({ readAuth, writeAuth }) {
+       // 裸签名，改为 'raw'（DER→r||s 转换在 signDeviceProof 内）。
+       signatureFormat: 'der',
+     }
+-    const next = { ...store, device }
+-    writeAuth(next)
++    devices[key] = device
++    writeAuth({ ...store, devices })
+     return device
+   }
+ 
+@@ -167,7 +183,8 @@ export function createTraeOAuth({ readAuth, writeAuth }) {
+     refreshInFlight = (async () => {
+       try {
+         const store = readAuth()
+-        const device = ensureDevice(store)
++        // 用当前账号自己的设备身份（每账号独立 device，2026-10-24）。
++        const device = ensureDevice(store, store.activeAccountId ?? store.account?.uid ?? '__pending__')
+         const timestamp = Math.floor(Date.now() / 1000)
+         const nonce = randomBytes(16).toString('hex')
+         const body = {
+@@ -252,7 +269,10 @@ export function createTraeOAuth({ readAuth, writeAuth }) {
+     }
+ 
+     const store = readAuth()
+-    const device = ensureDevice(store)
++    // 新账号登录：生成一台新设备（__pending__），授权成功后由组合根把该
++    // device 转移到新账号 id 下——不复用任何已有账号的 device，避免服务端
++    // 把新授权判成"同一设备换账号"而顶掉旧账号的令牌。
++    const device = ensureDevice(store, '__pending__')
+     const codeVerifier = b64url(randomBytes(48))
+     const codeChallenge = b64url(createHash('sha256').update(codeVerifier).digest())
+     const traceId = randomUUID()
+@@ -389,7 +409,9 @@ export function createTraeOAuth({ readAuth, writeAuth }) {
+             }
+           }
+         } catch { /* best-effort */ }
+-        writeAuth({ ...readAuth(), auth, account })
++        // __newDevice：本次登录用的 __pending__ 设备。组合根（writeTraeAuth）
++        // 新增账号时把它挂到新账号 id 下并清掉 __pending__——每账号一台设备。
++        writeAuth({ ...readAuth(), auth, account, __newDevice: device })
+         finish('<h3>登录成功</h3><p>可以回到 dsh 设置卡继续。</p>')
+       } catch (err) {
+         const errMsg = String(err?.message ?? err)
+@@ -422,10 +444,11 @@ export function createTraeOAuth({ readAuth, writeAuth }) {
+     pending.active = false
+     pending.error = ''
+     storeGeneration++ // 终止在飞 refresh：其落盘前的代际校验必然失败
+-    // 设备身份保留（clientId/密钥对与该账号的设备注册绑定，重登录可复用；
+-    // 只清令牌与账号）。
+-    const store = readAuth()
+-    writeAuth({ device: store.device })
++    // 设备身份按账号保留在 devices[]（组合根的 writeTraeAuth 删账号时不动
++    // devices）——原注释"设备身份与该账号的设备注册绑定，重登录可复用"的
++    // 语义由每账号 device 承接（2026-10-24 改每账号独立设备后，登出只清
++    // 令牌与账号条目，设备表整体保留）。
++    writeAuth({})
+   }
+ 
+   /** 供联调探测切换签名编码（der/raw）。 */
 diff --git a/scripts/trae-model-catalog.mjs b/scripts/trae-model-catalog.mjs
 index c5be74495e125f5fae4065b30302760551b7f90b..a832a2688bc406cd4bec77a0e02ad785410d796f 100644
 --- a/scripts/trae-model-catalog.mjs
