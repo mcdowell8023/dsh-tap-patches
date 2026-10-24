@@ -65,7 +65,7 @@ cd ~/projects/tools/dsh-tap-patches
 
 覆盖范围：**响应头阶段**（流已开始的 2xx 不换号）。Qoder 的 `403 + subCode RESOURCE_LIMIT`（排队）也会触发换号重试。
 
-支持通道：CodeBuddy、TraeWork CN。Qoder CN 仍是单账号（其 COSY 签名与设备绑定，改造前需先实测）。
+支持通道：CodeBuddy、TraeWork CN、Qoder CN（三者均已实现每账号独立设备身份 + 账号簿 + 自动切号）。
 
 ### Qoder 错误文案映射（补丁 7）
 

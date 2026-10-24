@@ -38,7 +38,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b08
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072dc219f3a 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..7a61315ea41d4722fa4917915b4a83c7f6bd4602 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -390,7 +390,164 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
    settings: () => traeSettingsFn(),
    withCredentials: (attempt) => withTraeCredentials(() => traeSettingsFn(), attempt),
    meter,
-@@ -1444,9 +1743,18 @@ function hostReconcileView(webService) {
+@@ -993,8 +1292,144 @@ const traeProvider = createTraeProvider({
+ // 镜像 providers.qoder 整块（路由存在性管理，同 trae 踩坑 #25 纪律）。
+ // ---------------------------------------------------------------------------
+ 
+-const readQoderAuth = () => readJson(QODER_AUTH_PATH)
+-const writeQoderAuth = (v) => writeJson(QODER_AUTH_PATH, v)
++// Qoder 的账号簿：与 Trae 同款——accounts[] 每账号一条，machines[] 每账号
++// 一个 machine_id。Qoder 设备流 OAuth 把 machine_id 与授权账号绑定（同 Trae
++// device），多账号共用一个 machine_id 会互顶令牌，故每账号独立生成。
++// schemaVersion 2 = 每账号独立 machine；1 = 顶层共享（读时迁移给所有已有
++// 账号——它们的令牌都是那台机器授权的）。
++const readQoderAuthStore = () => {
++  const raw = readJson(QODER_AUTH_PATH)
++  const machinesOf = (d) => (d && typeof d === 'object' && !Array.isArray(d)) ? { ...d } : {}
++  if (Array.isArray(raw.accounts)) {
++    const store = {
++      schemaVersion: 2,
++      machines: machinesOf(raw.machines),
++      accounts: raw.accounts.filter((a) => a && typeof a === 'object'),
++      activeAccountId: typeof raw.activeAccountId === 'string' ? raw.activeAccountId : null,
++      failedAccounts: raw.failedAccounts && typeof raw.failedAccounts === 'object' ? raw.failedAccounts : {},
++    }
++    // v1 迁移：顶层共享 machine 给所有已有账号（历史令牌都由它授权）。
++    if (raw.machine && typeof raw.machine === 'object' && typeof raw.machine.machineId === 'string'
++      && Object.keys(store.machines).length === 0) {
++      for (const acc of store.accounts) store.machines[acc.id] = { machineId: raw.machine.machineId }
++    }
++    return store
++  }
++  if (raw.auth && typeof raw.auth === 'object' && typeof raw.auth.accessToken === 'string') {
++    const id = (typeof raw.account?.uid === 'string' && raw.account.uid) || 'acc1'
++    return {
++      schemaVersion: 2,
++      machines: raw.machine && typeof raw.machine === 'object' && typeof raw.machine.machineId === 'string'
++        ? { [id]: { machineId: raw.machine.machineId } }
++        : {},
++      accounts: [{ id, auth: raw.auth, account: raw.account ?? {}, addedAt: Date.now() }],
++      activeAccountId: id,
++      failedAccounts: {},
++    }
++  }
++  return { schemaVersion: 2, machines: {}, accounts: [], activeAccountId: null, failedAccounts: {} }
++}
++
++const activeQoderAccount = (store) =>
++  store.accounts.find((a) => a.id === store.activeAccountId) ?? store.accounts[0] ?? null
++
++const readQoderAuth = () => {
++  const store = readQoderAuthStore()
++  const active = activeQoderAccount(store)
++  return active
++    ? {
++        machine: store.machines[active.id] ?? null,
++        machines: store.machines,
++        auth: active.auth,
++        account: active.account,
++        activeAccountId: active.id,
++      }
++    : { machine: null, machines: store.machines, activeAccountId: null }
++}
++
++function writeQoderAuth(v) {
++  const store = readQoderAuthStore()
++  if (v && typeof v === 'object') {
++    if (v.machines && typeof v.machines === 'object' && !Array.isArray(v.machines)) {
++      store.machines = { ...store.machines, ...v.machines }
++    }
++    if (v.machine && typeof v.machine === 'object') {
++      const targetId = store.activeAccountId ?? store.accounts[0]?.id
++      if (targetId) store.machines[targetId] = v.machine
++    }
++    const hasAuth = v.auth && typeof v.auth === 'object' && typeof v.auth.accessToken === 'string' && v.auth.accessToken.length > 0
++    if (!hasAuth) {
++      // logout / account-remove：删当前账号条目，machines 整体保留。
++      const active = activeQoderAccount(store)
++      if (active) {
++        store.accounts = store.accounts.filter((a) => a.id !== active.id)
++        store.activeAccountId = store.accounts[0]?.id ?? null
++      }
++      if (store.accounts.length === 0) {
++        writeJson(QODER_AUTH_PATH, { schemaVersion: 2, machines: store.machines, accounts: [], activeAccountId: null, failedAccounts: {} })
++        return
++      }
++    } else {
++      const uid = v.account?.uid
++      // 登录新号走 __newMachine：只按 uid 匹配，绝不用 activeAccountId——
++      // 否则第二个号登录会把当前账号的令牌覆盖（Trae 同款坑，2026-10-24）。
++      const isLoginFlow = Boolean(v.__newMachine)
++      const existing = store.accounts.find((a) =>
++        (uid && a.account?.uid === uid) || (!isLoginFlow && a.id === v.activeAccountId))
++      if (existing) {
++        existing.auth = v.auth
++        if (v.account && typeof v.account === 'object') existing.account = v.account
++        if (v.__newMachine) store.machines[existing.id] = v.__newMachine
++      } else {
++        const id = (uid && uid.length) ? uid : `acc${store.accounts.length + 1}`
++        store.accounts.push({ id, auth: v.auth, account: v.account ?? {}, addedAt: Date.now() })
++        store.activeAccountId = id
++        if (v.__newMachine) {
++          store.machines[id] = v.__newMachine
++          delete store.machines.__pending__
++        }
++      }
++      if (store.activeAccountId === null && store.accounts.length > 0) store.activeAccountId = store.accounts[0].id
++    }
++  }
++  store.schemaVersion = 2
++  writeJson(QODER_AUTH_PATH, store)
++}
++
++function qoderAccountsView() {
++  const store = readQoderAuthStore()
++  return {
++    activeAccountId: store.activeAccountId,
++    accounts: store.accounts.map((a) => ({
++      id: a.id,
++      nickname: a.account?.nickname || a.account?.email || a.id,
++      uid: a.account?.uid ?? '',
++      expiresAt: a.auth?.expiresAt ?? null,
++      active: a.id === store.activeAccountId,
++    })),
++  }
++}
++
++function setActiveQoderAccount(id) {
++  if (typeof id !== 'string' || !id) return false
++  const store = readQoderAuthStore()
++  if (!store.accounts.some((a) => a.id === id)) return false
++  if (store.activeAccountId !== id) {
++    store.activeAccountId = id
++    store.schemaVersion = 2
++    writeJson(QODER_AUTH_PATH, store)
++  }
++  return true
++}
++
++function markQoderAccountFailed(id) {
++  if (typeof id !== 'string' || !id) return
++  const store = readQoderAuthStore()
++  if (!store.accounts.some((a) => a.id === id)) return
++  store.failedAccounts = { ...store.failedAccounts, [id]: Date.now() }
++  store.schemaVersion = 2
++  writeJson(QODER_AUTH_PATH, store)
++}
+ 
+ const qoderRuntime = { running: false, port: null, lastError: null }
+ 
+@@ -1004,6 +1439,9 @@ let qoderSettingsFn = () => ({ qoderEnabled: false })
+ const qoderProvider = createQoderProvider({
+   readAuth: readQoderAuth,
+   writeAuth: writeQoderAuth,
++  readAuthStore: readQoderAuthStore,
++  setActiveAuthAccount: setActiveQoderAccount,
++  markAuthAccountFailed: markQoderAccountFailed,
+   settings: () => qoderSettingsFn(),
+   meter,
+   runtime: qoderRuntime,
+@@ -1444,9 +1882,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -412,7 +569,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1495,14 +1803,14 @@ function settingsView(resolveNow) {
+@@ -1495,14 +1942,14 @@ function settingsView(resolveNow) {
      // The raw file layer carries plaintext apiKeys[].key — never ship it to
      // the browser (the card only checks top-level field presence).
      user: maskedUserLayer(user),
@@ -429,7 +586,16 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
        bridge: {
          running: traeRuntime.running,
          port: traeRuntime.port,
-@@ -1635,12 +1943,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1537,7 +1984,7 @@ function settingsView(resolveNow) {
+         : null,
+     },
+     qoder: {
+-      oauth: qoderProvider.credentialView(),
++      oauth: { ...qoderProvider.credentialView(), ...qoderAccountsView() },
+       bridge: {
+         running: qoderRuntime.running,
+         port: qoderRuntime.port,
+@@ -1635,12 +2082,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -474,7 +640,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
                return
              }
              if (body?.action === 'model-list') {
-@@ -1804,17 +2142,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1804,17 +2281,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -522,7 +688,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
                return
              }
              if (body?.action === 'trae-model-sync') {
-@@ -1851,7 +2216,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1851,17 +2355,43 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -534,8 +700,43 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
                  .catch((err) => sendJSON(response, 502, { ok: false, error: err.message }))
                return
              }
+             if (body?.action === 'qoder-oauth-status') {
+-              sendJSON(response, 200, { ok: true, qoder: qoderProvider.credentialView() })
++              sendJSON(response, 200, { ok: true, qoder: { ...qoderProvider.credentialView(), ...qoderAccountsView() } })
++              return
++            }
++            if (body?.action === 'qoder-account-switch') {
++              const id = typeof body.id === 'string' ? body.id : ''
++              if (!setActiveQoderAccount(id)) {
++                sendJSON(response, 404, { ok: false, error: '账号不存在' })
++                return
++              }
++              sendJSON(response, 200, { ok: true, qoder: { ...qoderProvider.credentialView(), ...qoderAccountsView() } })
++              return
++            }
++            if (body?.action === 'qoder-account-remove') {
++              const id = typeof body.id === 'string' ? body.id : ''
++              const store = readQoderAuthStore()
++              if (!store.accounts.some((a) => a.id === id)) {
++                sendJSON(response, 404, { ok: false, error: '账号不存在' })
++                return
++              }
++              store.accounts = store.accounts.filter((a) => a.id !== id)
++              if (store.activeAccountId === id) store.activeAccountId = store.accounts[0]?.id ?? null
++              store.schemaVersion = 2
++              writeJson(QODER_AUTH_PATH, store)
++              sendJSON(response, 200, { ok: true, qoder: { ...qoderProvider.credentialView(), ...qoderAccountsView() } })
+               return
+             }
+             if (body?.action === 'qoder-oauth-logout') {
+               qoderProvider.oauth.logout()
+-              sendJSON(response, 200, { ok: true, qoder: qoderProvider.credentialView() })
++              sendJSON(response, 200, { ok: true, qoder: { ...qoderProvider.credentialView(), ...qoderAccountsView() } })
+               return
+             }
+             if (body?.action === 'qoder-model-sync') {
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..bc06c44763bc2ec67de6b6c4a51eaad5de0cec9a 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..d7e83bbc295b7c79f097cc2c807c73efd2e0156b 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -1152,16 +1152,57 @@ window.__ModuleLoader__.load({
@@ -689,6 +890,48 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..bc06c44763bc2ec67de6b6c4a51eaad5
  			var qfmtPool = function (q) { return "余 " + fmtCredit(q.remaining) + " / " + fmtCredit(q.total) + (q.unit ? " " + q.unit : ""); };
  			var balanceText = !quota ? "读取中…"
  				: quota.error ? "—（" + quota.error + "）"
+@@ -2618,6 +2697,41 @@ window.__ModuleLoader__.load({
+ 							? createElement("span", { className: qTest.ok ? "cbc-status" : "cbc-warn", "data-test": "qoder" }, qTest.text)
+ 							: null),
+ 				}),
++				// 多账号：切换组（≥2 个显示）+ 单账号也显示当前账号名（2026-10-24
++				// 与 CodeBuddy/Trae 同款可发现性）。余额行按 activeAccountId 重拉。
++				qoauth.signedIn && Array.isArray(qoauth.accounts) && qoauth.accounts.length > 1
++					? createElement("div", { key: "qaccts", className: "cbc-addrow" },
++						createElement("span", { className: "cbc-muted" }, "账号"),
++						qoauth.accounts.map(function (a) {
++							return createElement(CbcButton, {
++								key: a.id,
++								variant: a.active ? "primary" : "outline",
++								title: "令牌至 " + (a.expiresAt ? fmtTime(a.expiresAt) : "未知") + (a.active && qoauth.needsRelogin ? "（需重新登录）" : ""),
++								onClick: function () {
++									if (a.active) return;
++									post({ action: "qoder-account-switch", id: a.id }).then(function (res) {
++										if (res.ok) reload();
++										else setErr(res.d && res.d.error ? res.d.error : "切换失败（HTTP " + res.status + "）");
++									}).catch(function (e) { setErr(e && e.message ? e.message : "切换失败（网络）"); });
++								},
++							}, (a.nickname || a.id) + (a.active ? " ✓" : "") + (a.active && qoauth.needsRelogin ? "（需重登）" : ""));
++						}))
++					: qoauth.signedIn && Array.isArray(qoauth.accounts) && qoauth.accounts.length === 1
++						? createElement("div", { key: "qaccts1", className: "cbc-addrow" },
++							createElement("span", { className: "cbc-muted" }, "账号"),
++							createElement("span", { className: "cbc-cell-name", title: "令牌至 " + (qoauth.accounts[0].expiresAt ? fmtTime(qoauth.accounts[0].expiresAt) : "未知") + (qoauth.needsRelogin ? "（需重新登录）" : "") }, qoauth.accounts[0].nickname || qoauth.accounts[0].id))
++						: null,
++				qoauth.signedIn
++					? createElement("div", { key: "qaddacct", className: "cbc-addrow" },
++						createElement("span", { className: "cbc-muted" },
++							Array.isArray(qoauth.accounts) && qoauth.accounts.length > 1 ? "添加账号（新号自动成为当前）" : "添加第二个账号"),
++						createElement(CbcButton, { variant: "outline", onClick: function () {
++							post({ action: "qoder-oauth-start" }).then(function (res) {
++								if (res.ok) reload();
++								else setErr(res.d && res.d.error ? res.d.error : "发起登录失败");
++							}).catch(function (e) { setErr(e && e.message ? e.message : "发起登录失败（网络）"); });
++						} }, "添加账号"))
++					: null,
+ 				createElement("div", { className: "cbc-row" },
+ 					createElement("div", { className: "cbc-row-label" }, "余额"),
+ 					createElement("div", { className: "cbc-row-control" },
 diff --git a/providers/codebuddy/catalog.js b/providers/codebuddy/catalog.js
 index 86ddf37005618046b4da8da5ad51b9b6141dd21e..9b24c51343c0b1ffb0e6ea8c90807f7544fbae22 100644
 --- a/providers/codebuddy/catalog.js
@@ -902,6 +1145,152 @@ index 74600ed07316b5b133f3c6b025129b7163c95d55..c66a9dc221ee9ae9e4181606be08ddff
                }
                return
              }
+diff --git a/providers/qoder/index.js b/providers/qoder/index.js
+index a688952077dbadb3a1e2461834309b6e5dbc9daa..0fd217ece46821c60624f5d21949df2d2b4b0608 100644
+--- a/providers/qoder/index.js
++++ b/providers/qoder/index.js
+@@ -94,8 +94,31 @@ export function createQoderProvider(deps) {
+       return oauth.oauthStatus()
+     },
+ 
++    /**
++     * 额度/凭据类拒绝（401/403/429）后的自动切号——与 CodeBuddy/Trae 同款
++     * 串行语义：当前账号进 10 分钟冷宫，切到下一个未冷却的账号。
++     */
++    rotateAccountOnQuota() {
++      const store = deps.readAuthStore?.()
++      const accounts = Array.isArray(store?.accounts) ? store.accounts : []
++      if (accounts.length < 2) return false
++      const current = accounts.find((a) => a.id === store.activeAccountId) ?? accounts[0]
++      deps.markAuthAccountFailed?.(current.id)
++      const failed = (store.failedAccounts && typeof store.failedAccounts === 'object' && !Array.isArray(store.failedAccounts))
++        ? store.failedAccounts
++        : {}
++      const from = accounts.indexOf(current)
++      for (let step = 1; step < accounts.length; step += 1) {
++        const cand = accounts[(from + step) % accounts.length]
++        const cooledAt = failed[cand.id]
++        if (typeof cooledAt === 'number' && Date.now() - cooledAt < 10 * 60 * 1000) continue
++        if (deps.setActiveAuthAccount?.(cand.id)) return true
++      }
++      return false
++    },
++
+     /** 账户配额只读快照（60s memoize，永不 throw）。 */
+-    quota: createQoderQuota({ settings: deps.settings, oauth }),
++    quota: createQoderQuota({ settings: deps.settings, oauth, readAuth: deps.readAuth }),
+   }
+ 
+   const gateway = createQoderGateway({
+diff --git a/providers/qoder/oauth.js b/providers/qoder/oauth.js
+index 31c8875769cdf8db08fb75eb37851e015b8803b7..d5fdea6bc723546a7c96d1193ba448a4f7767eca 100644
+--- a/providers/qoder/oauth.js
++++ b/providers/qoder/oauth.js
+@@ -143,12 +143,24 @@ export function createQoderOAuth({ readAuth, writeAuth }) {
+   let reloginNeeded = false
+   const pending = { active: false, authUrl: '', error: '' }
+ 
+-  /** 机器标识幂等自持：首次使用生成并落盘，之后所有登录/刷新复用一个。 */
+-  function ensureMachineId() {
++  /**
++   * 机器标识按账号自持（2026-10-24 改每账号独立）：
++   * Qoder 设备流 OAuth 把 machine_id 与授权账号绑定，多账号共用一个会互顶
++   * 令牌（同 Trae device 的坑）。key 约定同 Trae：
++   *   '<accountId>'  已有账号（refresh/出站用 active 账号的）
++   *   '__pending__'  登录中：轮询出令牌后由组合根 writeAuth（__newMachine）
++   *                  转移到新账号 id 下。
++   */
++  function ensureMachineId(key) {
+     const store = readAuth()
+-    if (typeof store.machine?.machineId === 'string' && store.machine.machineId) return store.machine.machineId
++    const machines = store.machines && typeof store.machines === 'object' && !Array.isArray(store.machines)
++      ? store.machines
++      : {}
++    const own = machines[key]
++    if (typeof own?.machineId === 'string' && own.machineId) return own.machineId
+     const machineId = createMachineId()
+-    writeAuth({ ...store, machine: { machineId } })
++    machines[key] = { machineId }
++    writeAuth({ ...store, machines })
+     return machineId
+   }
+ 
+@@ -164,10 +176,12 @@ export function createQoderOAuth({ readAuth, writeAuth }) {
+         const store = readAuth()
+         const auth = store.auth
+         if (!auth?.refreshToken) { reloginNeeded = true; return undefined }
++        // 当前账号自己的 machine（每账号独立，2026-10-24）。
++        const machineId = ensureMachineId(store.activeAccountId ?? store.account?.uid ?? '__pending__')
+         const res = await fetch(api(s, '/api/v1/deviceToken/refresh'), {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+-          body: JSON.stringify({ refresh_token: auth.refreshToken, machine_id: store.machine?.machineId ?? '' }),
++          body: JSON.stringify({ refresh_token: auth.refreshToken, machine_id: machineId }),
+         })
+         if (!res.ok) { reloginNeeded = true; return undefined }
+         const body = await res.json().catch(() => null)
+@@ -245,7 +259,9 @@ export function createQoderOAuth({ readAuth, writeAuth }) {
+ 
+     // 基址校验置于 machine_id 生成之前：非法设置不产生任何写入、不激活 pending。
+     assertLoginBase(s.qoderLoginHost)
+-    const machineId = ensureMachineId()
++    // 新账号登录：生成新 machine（__pending__），轮询出令牌后由组合根转移到
++    // 新账号 id 下——不复用已有账号的 machine，避免服务端判"同机换号"顶掉旧号。
++    const machineId = ensureMachineId('__pending__')
+     const { authUrl, verifier, nonce } = buildAuthUrl(s, machineId)
+     // 门禁置于置位之前：拒绝时 pending 不激活，不外泄未过检的 URL。
+     assertSafeAuthUrl(authUrl)
+@@ -286,6 +302,7 @@ export function createQoderOAuth({ readAuth, writeAuth }) {
+             ...readAuth(),
+             auth: { ...auth, loginMethod: 'browser' },
+             ...(account ? { account } : {}),
++            __newMachine: { machineId },
+           })
+           reloginNeeded = false
+           return
+@@ -349,8 +366,8 @@ export function createQoderOAuth({ readAuth, writeAuth }) {
+     pending.active = false
+     pending.error = ''
+     reloginNeeded = false
+-    const store = readAuth()
+-    writeAuth({ machine: store.machine }) // 机器标识保留，令牌与账号清除
++    // 删当前账号条目；machines 整体保留（每账号独立，设备与账号绑定语义）。
++    writeAuth({})
+   }
+ 
+   return {
+diff --git a/providers/qoder/quota.js b/providers/qoder/quota.js
+index 5d70727325313fff04c676daa37b85ab795e40e9..aaa3814afaec5135309025c4a93576cd5b75067c 100644
+--- a/providers/qoder/quota.js
++++ b/providers/qoder/quota.js
+@@ -11,8 +11,9 @@
+  * 失败回 { error }，调用方（设置卡）据此显示「—」，绝不编造数值。
+  */
+ 
+-export function createQoderQuota({ settings, oauth }) {
+-  let cache = { at: 0, value: null }
++export function createQoderQuota({ settings, oauth, readAuth }) {
++  // key = 当前账号 id：多账号切换后余额必须跟着变（2026-10-24）。
++  let cache = { key: null, at: 0, value: null }
+ 
+   async function fetchSnapshot() {
+     const s = settings()
+@@ -43,11 +44,13 @@ export function createQoderQuota({ settings, oauth }) {
+   }
+ 
+   function snapshot() {
+-    if (cache.value && Date.now() - cache.at < 60_000) return Promise.resolve(cache.value)
++    // 账号维度 memoize：切号即失效（不等 60s）。
++    const key = readAuth?.()?.activeAccountId ?? readAuth?.()?.account?.uid ?? ''
++    if (cache.key === key && cache.value && Date.now() - cache.at < 60_000) return Promise.resolve(cache.value)
+     return fetchSnapshot()
+       .catch((err) => ({ error: err?.message ?? String(err), fetchedAt: Date.now() }))
+       .then((value) => {
+-        cache = { at: Date.now(), value }
++        cache = { key, at: Date.now(), value }
+         return value
+       })
+   }
 diff --git a/providers/trae/index.js b/providers/trae/index.js
 index ea64988a70f5bcf1b60ab61ff1fbaff24505d2cb..2f28de97e90f565186d951feb8b97c917004250e 100644
 --- a/providers/trae/index.js
