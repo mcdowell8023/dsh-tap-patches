@@ -535,7 +535,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..6bf17887aa607058bc6932cc0a1f6072
                return
              }
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..b89938531a98a84342fb5472954aa6777250c9cb 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..bc06c44763bc2ec67de6b6c4a51eaad5de0cec9a 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -1152,16 +1152,57 @@ window.__ModuleLoader__.load({
@@ -606,6 +606,15 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..b89938531a98a84342fb5472954aa677
  				} else if (oauth.pending) {
  					parts.push(createElement("p", { key: "pend", className: "cbc-status" }, "等待浏览器完成登录…（3 秒轮询，完成后自动刷新）"));
  					parts.push(createElement("div", { key: "url", className: "cbc-addrow" },
+@@ -2148,7 +2189,7 @@ window.__ModuleLoader__.load({
+ 					setQuota({ error: e && e.message ? e.message : "（网络）" });
+ 				});
+ 			};
+-			useEffect(function () { fetchQuota(); }, [active, toauth.signedIn]);
++			useEffect(function () { fetchQuota(); }, [active, toauth.signedIn, toauth.activeAccountId]);
+ 			var balanceText = !quota ? "读取中…"
+ 				: quota.error ? "—（" + quota.error + "）"
+ 					: quota.pools
 @@ -2215,6 +2256,8 @@ window.__ModuleLoader__.load({
  			};
  
@@ -671,6 +680,57 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..b89938531a98a84342fb5472954aa677
  				createElement("div", { className: "cbc-row" },
  					createElement("div", { className: "cbc-row-label" }, "余额"),
  					createElement("div", { className: "cbc-row-control" },
+@@ -2456,7 +2535,7 @@ window.__ModuleLoader__.load({
+ 					setQuota({ error: e && e.message ? e.message : "（网络）" });
+ 				});
+ 			};
+-			useEffect(function () { fetchQuota(); }, [active, qoauth.signedIn]);
++			useEffect(function () { fetchQuota(); }, [active, qoauth.signedIn, qoauth.activeAccountId]);
+ 			var qfmtPool = function (q) { return "余 " + fmtCredit(q.remaining) + " / " + fmtCredit(q.total) + (q.unit ? " " + q.unit : ""); };
+ 			var balanceText = !quota ? "读取中…"
+ 				: quota.error ? "—（" + quota.error + "）"
+diff --git a/providers/codebuddy/catalog.js b/providers/codebuddy/catalog.js
+index 86ddf37005618046b4da8da5ad51b9b6141dd21e..9b24c51343c0b1ffb0e6ea8c90807f7544fbae22 100644
+--- a/providers/codebuddy/catalog.js
++++ b/providers/codebuddy/catalog.js
+@@ -113,7 +113,7 @@ export function createCatalog({ resolveCredential, envKey }) {
+    * quota-signals.md R-Q7）；api-key 模式该路径族 401（OAuth-only），
+    * numericQuota=false，卡片应手填总额度做估算档。
+    */
+-  let quotaCache = { at: 0, value: null }
++  let quotaCache = { key: null, at: 0, value: null }
+ 
+   /** get-user-resource 的数值字段带 Precise 字符串变体；统一取数值。 */
+   const num = (v) => {
+@@ -211,14 +211,25 @@ export function createCatalog({ resolveCredential, envKey }) {
+     }
+   }
+ 
+-  function quotaSnapshot(settingsFn) {
+-    if (quotaCache.value && Date.now() - quotaCache.at < 60_000) {
++  async function quotaSnapshot(settingsFn) {
++    // 账号维度 memoize：多账号切换后余额必须跟着变（2026-10-24 反馈）。
++    // key = 当前账号的 X-User-Id（resolveCredential 本地解析，无网络成本；
++    // token 未过期不触发 refresh）。
++    let key = ''
++    try {
++      const cred = await resolveCredential(settingsFn)
++      if (!cred) return { error: '凭据不可用：请先配置 API Key 或完成 OAuth 登录' }
++      key = String(cred.headers?.['X-User-Id'] ?? cred.authorization ?? '')
++    } catch (err) {
++      return { error: err?.message ?? String(err) }
++    }
++    if (quotaCache.key === key && quotaCache.value && Date.now() - quotaCache.at < 60_000) {
+       return Promise.resolve(quotaCache.value)
+     }
+     return fetchQuotaSnapshot(settingsFn)
+       .catch((err) => ({ error: err?.message ?? String(err) }))
+       .then((value) => {
+-        quotaCache = { at: Date.now(), value }
++        quotaCache = { key, at: Date.now(), value }
+         return value
+       })
+   }
 diff --git a/providers/codebuddy/index.js b/providers/codebuddy/index.js
 index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d85044292ea6d 100644
 --- a/providers/codebuddy/index.js
@@ -969,6 +1029,38 @@ index 57161ecc2b70fdbbe881566eab342b569b44d6ac..8e76eb6145022de870481164f7ea8eae
    }
  
    /** 供联调探测切换签名编码（der/raw）。 */
+diff --git a/providers/trae/quota.js b/providers/trae/quota.js
+index 35d77624401b7fadb08129704d57f36cae9fd8f9..9c495db25f8d92ca4dfa4705dab8244e47679655 100644
+--- a/providers/trae/quota.js
++++ b/providers/trae/quota.js
+@@ -15,7 +15,9 @@
+ import { traeOutboundHeaders } from './gateway.js'
+ 
+ export function createTraeQuota({ settings, readAuth, oauth }) {
+-  let cache = { at: 0, value: null }
++  // key = 当前账号 id：多账号切换后余额必须跟着变（2026-10-24 反馈：
++  // 切号后余额行 60s 内仍是旧账号的值——memoize 原来不认账号）。
++  let cache = { key: null, at: 0, value: null }
+   // 单飞：并发 snapshot 共享同一在飞请求，不重复打上游。
+   let inFlight = null
+ 
+@@ -59,12 +61,14 @@ export function createTraeQuota({ settings, readAuth, oauth }) {
+   }
+ 
+   function snapshot() {
+-    if (cache.value && Date.now() - cache.at < 60_000) return Promise.resolve(cache.value)
++    // 账号维度 memoize：切号即失效（不等 60s）。
++    const key = readAuth()?.activeAccountId ?? readAuth()?.account?.uid ?? ''
++    if (cache.key === key && cache.value && Date.now() - cache.at < 60_000) return Promise.resolve(cache.value)
+     if (inFlight) return inFlight
+     inFlight = fetchSnapshot()
+       .catch((err) => ({ error: err?.message ?? String(err), fetchedAt: Date.now() }))
+       .then((value) => {
+-        cache = { at: Date.now(), value }
++        cache = { key, at: Date.now(), value }
+         return value
+       })
+       .finally(() => { inFlight = null })
 diff --git a/scripts/trae-model-catalog.mjs b/scripts/trae-model-catalog.mjs
 index c5be74495e125f5fae4065b30302760551b7f90b..a832a2688bc406cd4bec77a0e02ad785410d796f 100644
 --- a/scripts/trae-model-catalog.mjs
