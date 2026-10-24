@@ -498,15 +498,16 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..9dc4f38ba0fe12877b0768469c909634
                return
              }
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0ac0cb55aa53892d891398864fbe43feff50105f 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..ac49da2b2b6975ab01c044af6315dd6d90cde0f9 100644
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -1152,6 +1152,33 @@ window.__ModuleLoader__.load({
+@@ -1152,6 +1152,39 @@ window.__ModuleLoader__.load({
  							oauth.accessTokenExpiresAt ? (acct.type ? " · 令牌至 " : "令牌至 ") + fmtTime(oauth.accessTokenExpiresAt) : "")));
  					parts.push(createElement("p", { key: "scope", className: "cbc-hint" },
  						"此登录覆盖模型对话（主聊天经流式桥统一取凭据）、网络搜索与抓取、生图与额度读数。"));
-+					// 多账号：列表 + 切换 + 添加（host 侧 accounts[] 由 writeAuth 归位，
-+					// 登录另一个号即新增一条；切换只改 activeAccountId，下次请求生效）。
++					// 多账号：账号切换（多个时显示）+ 添加账号。单账号时也显示
++					// 当前账号名——否则用户看不到多账号功能的存在（2026-10-23
++					// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
 +					var accts = Array.isArray(oauth.accounts) ? oauth.accounts : [];
 +					if (accts.length > 1) {
 +						parts.push(createElement("div", { key: "accts", className: "cbc-addrow" },
@@ -524,8 +525,13 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0ac0cb55aa53892d891398864fbe43fe
 +									},
 +								}, (a.nickname || a.id) + (a.active ? " ✓" : ""));
 +							})));
++					} else if (accts.length === 1) {
++						parts.push(createElement("div", { key: "accts1", className: "cbc-addrow" },
++							createElement("span", { className: "cbc-muted" }, "账号"),
++							createElement("span", { className: "cbc-cell-name" }, accts[0].nickname || accts[0].id)));
 +					}
 +					parts.push(createElement("div", { key: "addacct", className: "cbc-addrow" },
++						createElement("span", { className: "cbc-muted" }, accts.length > 1 ? "添加账号（新号自动成为当前）" : "添加第二个账号"),
 +						createElement(CbcButton, { variant: "outline", onClick: function () {
 +							post({ action: "oauth-start" }).then(function (res) {
 +								if (res.ok) reload();
@@ -535,11 +541,13 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0ac0cb55aa53892d891398864fbe43fe
  					parts.push(createElement("div", { key: "out", className: "cbc-addrow" },
  						confirmAct === "__logout__"
  								? createElement(CbcButton, { variant: "outline", danger: true, onClick: function () {
-@@ -2289,6 +2316,33 @@ window.__ModuleLoader__.load({
+@@ -2289,6 +2322,41 @@ window.__ModuleLoader__.load({
  							: createElement(CbcButton, { variant: "outline", danger: true, onClick: askTLogout }, "退出登录"))
  						: createElement(CbcButton, { variant: "primary", disabled: busy, onClick: startLogin }, busy ? "启动中…" : "登录（浏览器授权）"),
  				}),
-+				// 多账号：账号切换（多个时显示）+ 添加账号。
++				// 多账号：账号切换（多个时显示）+ 添加账号。单账号时也显示
++				// 当前账号名——否则用户看不到多账号功能的存在（2026-10-23
++				// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
 +				toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length > 1
 +					? createElement("div", { key: "taccts", className: "cbc-addrow" },
 +						createElement("span", { className: "cbc-muted" }, "账号"),
@@ -556,9 +564,15 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..0ac0cb55aa53892d891398864fbe43fe
 +								},
 +							}, (a.nickname || a.id) + (a.active ? " ✓" : ""));
 +						}))
-+					: null,
++					: toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length === 1
++						? createElement("div", { key: "taccts1", className: "cbc-addrow" },
++							createElement("span", { className: "cbc-muted" }, "账号"),
++							createElement("span", { className: "cbc-cell-name" }, toauth.accounts[0].nickname || toauth.accounts[0].id))
++						: null,
 +				toauth.signedIn
 +					? createElement("div", { key: "taddacct", className: "cbc-addrow" },
++						createElement("span", { className: "cbc-muted" },
++							Array.isArray(toauth.accounts) && toauth.accounts.length > 1 ? "添加账号（新号自动成为当前）" : "添加第二个账号"),
 +						createElement(CbcButton, { variant: "outline", onClick: function () {
 +							post({ action: "trae-oauth-start" }).then(function (res) {
 +								if (res.ok) reload();
