@@ -1,8 +1,8 @@
 diff --git a/core/bridge.js b/core/bridge.js
-index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b081d242c95 100644
+index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f5ff5ed84 100644
 --- a/core/bridge.js
 +++ b/core/bridge.js
-@@ -507,7 +507,7 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+@@ -507,14 +507,18 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
        // long SSE stream is unaffected. Per attempt, so a failover retry gets
        // its own window.
        const firstByteMs = Number(s.upstreamFirstByteTimeoutMs) > 0 ? Number(s.upstreamFirstByteTimeoutMs) : 45_000
@@ -11,7 +11,19 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..1b05c641dba04f180ebb4d61cad63b08
          outHeaders.Authorization = c.authorization
          for (const name of credHeaderNames) delete outHeaders[name]
          credHeaderNames = Object.keys(c.headers ?? {})
-@@ -526,6 +526,25 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+         Object.assign(outHeaders, c.headers)
+         const attemptAbort = new AbortController()
+         const firstByteTimer = setTimeout(() => {
+-          const err = new Error(`upstream sent no response headers within ${firstByteMs}ms (first-byte timeout)`)
++          // 文案带 VPN/代理排查提示：2026-10-24 实测企业 VPN（RG-SSLVPN）开启
++          // 时把上游公网域名的流量导入隧道、连接被挂起，表现为本超时——
++          // 与插件无关（VPN 关闭后同请求 200）。提示不进 AUTH 分类（无
++          // 401/403 字面量）。
++          const err = new Error(`upstream sent no response headers within ${firstByteMs}ms (first-byte timeout)；若刚开启/关闭 VPN 或代理，请检查其对上游域名的路由（企业 VPN 把公网 API 流量导入隧道时会出现此挂起）`)
+           err.name = 'AbortError'
+           err.firstByteTimeout = true
+           attemptAbort.abort(err)
+@@ -526,6 +530,25 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
            signal: AbortSignal.any([clientAbort.signal, attemptAbort.signal]),
          }).finally(() => clearTimeout(firstByteTimer))
        })
