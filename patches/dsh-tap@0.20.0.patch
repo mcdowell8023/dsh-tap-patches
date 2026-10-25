@@ -50,7 +50,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..34ff4214162c70a76fac52164edb0f6c39167fce 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a52978e1ed25 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -761,7 +761,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..34ff4214162c70a76fac52164edb0f6c
          stopTraeBridge = null
          traeRunningPort = null
        }
-@@ -2213,8 +2743,13 @@ export function apply(ctx, config = {}) {
+@@ -2213,13 +2743,23 @@ export function apply(ctx, config = {}) {
      }
      // Same wedge self-heal as syncBridge above: lastError set = not actually
      // listening, retry instead of early-returning.
@@ -777,7 +777,17 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..34ff4214162c70a76fac52164edb0f6c
      traeRunningPort = s.traeBridgePort
      traeRuntime.running = false
      traeRuntime.port = s.traeBridgePort
-@@ -2236,11 +2771,11 @@ export function apply(ctx, config = {}) {
+     traeRuntime.lastError = null
+     stopTraeBridge = traeProvider.gateway.listen(traeRunningPort)
++    // 端口对账自愈（见上方注释）：2s 后重解析，期望端口变了就重跑。
++    setTimeout(() => {
++      const s2 = resolveNow()
++      if (s2.traeEnabled === true && s2.traeBridgePort !== traeRunningPort) syncTraeBridge()
++    }, 2000).unref?.()
+     traeProvider.syncCatalog().then((r) => {
+       if (r.ok) {
+         syncTraeModelsToDshSettings()
+@@ -2236,11 +2776,11 @@ export function apply(ctx, config = {}) {
    qoderSettingsFn = resolveNow
    let stopQoderBridge = null
    let qoderRunningPort = null
@@ -791,7 +801,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..34ff4214162c70a76fac52164edb0f6c
          stopQoderBridge = null
          qoderRunningPort = null
        }
-@@ -2250,8 +2785,9 @@ export function apply(ctx, config = {}) {
+@@ -2250,13 +2790,19 @@ export function apply(ctx, config = {}) {
        syncQoderModelsToDshSettings()
        return
      }
@@ -803,6 +813,16 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..34ff4214162c70a76fac52164edb0f6c
      qoderRunningPort = s.qoderBridgePort
      qoderRuntime.running = false
      qoderRuntime.port = s.qoderBridgePort
+     qoderRuntime.lastError = null
+     stopQoderBridge = qoderProvider.gateway.listen(qoderRunningPort)
++    // 同 Trae：listen 后端口对账自愈（probe 兜底就绪晚于首轮 listen）。
++    setTimeout(() => {
++      const s2 = resolveNow()
++      if (s2.qoderEnabled === true && s2.qoderBridgePort !== qoderRunningPort) syncQoderBridge()
++    }, 2000).unref?.()
+     qoderProvider.syncCatalog().then((r) => {
+       if (r.ok) {
+         syncQoderModelsToDshSettings()
 diff --git a/lib/client.js b/lib/client.js
 index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..d7e83bbc295b7c79f097cc2c807c73efd2e0156b 100644
 --- a/lib/client.js
