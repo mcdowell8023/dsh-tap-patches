@@ -50,7 +50,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..7a61315ea41d4722fa4917915b4a83c7f6bd4602 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..34ff4214162c70a76fac52164edb0f6c39167fce 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -747,6 +747,62 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..7a61315ea41d4722fa4917915b4a83c7
                return
              }
              if (body?.action === 'qoder-model-sync') {
+@@ -2197,11 +2727,11 @@ export function apply(ctx, config = {}) {
+   traeSettingsFn = resolveNow
+   let stopTraeBridge = null
+   let traeRunningPort = null
+-  const syncTraeBridge = () => {
++  const syncTraeBridge = async () => {
+     const s = resolveNow()
+     if (s.traeEnabled !== true) {
+       if (stopTraeBridge) {
+-        stopTraeBridge()
++        await stopTraeBridge()
+         stopTraeBridge = null
+         traeRunningPort = null
+       }
+@@ -2213,8 +2743,13 @@ export function apply(ctx, config = {}) {
+     }
+     // Same wedge self-heal as syncBridge above: lastError set = not actually
+     // listening, retry instead of early-returning.
+-    if (stopTraeBridge && traeRunningPort === s.traeBridgePort && !traeRuntime.lastError) return
+-    if (stopTraeBridge) stopTraeBridge()
++    // 早退条件按 running 判（不是 !lastError）：静默失败时 running=false 而
++    // lastError 也是空，原条件会误判健康直接早退、永不重试（2026-10-25 实测）。
++    if (stopTraeBridge && traeRunningPort === s.traeBridgePort && traeRuntime.running) return
++    // close 是异步的（server.close 回调后才真正释放端口）：不等它完成就
++    // listen 同端口会 EADDRINUSE/静默失败——2026-10-25 实测重启后 Trae/Qoder
++    // 桥端口空（catalog 同步过但没监听），根因即此。await 完再 listen。
++    if (stopTraeBridge) { await stopTraeBridge(); stopTraeBridge = null }
+     traeRunningPort = s.traeBridgePort
+     traeRuntime.running = false
+     traeRuntime.port = s.traeBridgePort
+@@ -2236,11 +2771,11 @@ export function apply(ctx, config = {}) {
+   qoderSettingsFn = resolveNow
+   let stopQoderBridge = null
+   let qoderRunningPort = null
+-  const syncQoderBridge = () => {
++  const syncQoderBridge = async () => {
+     const s = resolveNow()
+     if (s.qoderEnabled !== true) {
+       if (stopQoderBridge) {
+-        stopQoderBridge()
++        await stopQoderBridge()
+         stopQoderBridge = null
+         qoderRunningPort = null
+       }
+@@ -2250,8 +2785,9 @@ export function apply(ctx, config = {}) {
+       syncQoderModelsToDshSettings()
+       return
+     }
+-    if (stopQoderBridge && qoderRunningPort === s.qoderBridgePort && !qoderRuntime.lastError) return
+-    if (stopQoderBridge) stopQoderBridge()
++    if (stopQoderBridge && qoderRunningPort === s.qoderBridgePort && qoderRuntime.running) return
++    // 同 syncTraeBridge：await close 完成再 listen（2026-10-25 竞态修复）。
++    if (stopQoderBridge) { await stopQoderBridge(); stopQoderBridge = null }
+     qoderRunningPort = s.qoderBridgePort
+     qoderRuntime.running = false
+     qoderRuntime.port = s.qoderBridgePort
 diff --git a/lib/client.js b/lib/client.js
 index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..d7e83bbc295b7c79f097cc2c807c73efd2e0156b 100644
 --- a/lib/client.js
