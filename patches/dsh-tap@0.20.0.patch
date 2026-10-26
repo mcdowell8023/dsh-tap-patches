@@ -1,8 +1,26 @@
 diff --git a/core/bridge.js b/core/bridge.js
-index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f5ff5ed84 100644
+index 5cf1aeab0debdacbbe94ae1630934946f027770f..6a7bffedc1943d84884d24ba6371c8a73f1ae020 100644
 --- a/core/bridge.js
 +++ b/core/bridge.js
-@@ -507,14 +507,18 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+@@ -468,6 +468,9 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+     }
+ 
+     /** Outcome record shared by every exit path below. */
++    // 出站账号标识：多账号后必须一眼看出「这条请求实际用哪个账号」——
++    // 只记入站头不够（入站是 dsh 的哨兵头，看不到凭证身份）。
++    let servedAccount = null
+     const logOut = (extra) => {
+       if (!logId) return
+       bridgeLog({
+@@ -476,6 +479,7 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+         ts: Date.now(),
+         ms: Date.now() - t0,
+         ...(Object.keys(sessionOut).length > 0 ? { sessionOut } : {}),
++        ...(servedAccount ? { servedAccount } : {}),
+         ...extra,
+       })
+     }
+@@ -507,14 +511,18 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
        // long SSE stream is unaffected. Per attempt, so a failover retry gets
        // its own window.
        const firstByteMs = Number(s.upstreamFirstByteTimeoutMs) > 0 ? Number(s.upstreamFirstByteTimeoutMs) : 45_000
@@ -23,11 +41,19 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f
            err.name = 'AbortError'
            err.firstByteTimeout = true
            attemptAbort.abort(err)
-@@ -526,6 +530,25 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+@@ -526,6 +534,39 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
            signal: AbortSignal.any([clientAbort.signal, attemptAbort.signal]),
          }).finally(() => clearTimeout(firstByteTimer))
        })
 +      let { cred, res: upstream0, err } = await runAttempt()
++      // 记录本条请求实际服务的账号（凭据身份），供事后核对"切号是否真生效"。
++      if (cred) {
++        servedAccount = {
++          uid: cred.headers?.['X-User-Id'] ?? null,
++          keyName: cred.keyName ?? null,
++          rotated: false,
++        }
++      }
 +      // 自动切号重试：上游以额度/凭据类状态拒绝（401 凭据失效 / 403 额度或
 +      // 排队 / 429 限流）且 provider 提供 rotateAccountOnQuota 时，把当前账号
 +      // 打进冷宫、切到下一个账号再试一次。只重试一次；流已开始的 2xx 不进这
@@ -43,6 +69,12 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f
 +            cred = retry.cred
 +            upstream0 = retry.res
 +            err = retry.err
++            // 换号后重记：这条请求最终是哪个账号服务的。
++            servedAccount = {
++              uid: cred.headers?.['X-User-Id'] ?? null,
++              keyName: cred.keyName ?? null,
++              rotated: true,
++            }
 +          }
 +        }
 +      }
