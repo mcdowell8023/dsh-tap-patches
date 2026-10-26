@@ -928,7 +928,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..7d4d6eb585501f06dbc08dbba915669d
        if (r.ok) {
          syncQoderModelsToDshSettings()
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec65035985 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..256b1f1e2a55afdba07cda9b018df15ceec9fdf6 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -1152,16 +1152,57 @@ window.__ModuleLoader__.load({
@@ -950,7 +950,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec
 +					// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
 +					var accts = Array.isArray(oauth.accounts) ? oauth.accounts : [];
 +					if (accts.length > 1) {
-+						parts.push(createElement("div", { key: "accts", className: "cbc-addrow" },
++						parts.push(createElement("div", { key: "accts", className: "cbc-addrow", style: { marginBottom: 10 } },
 +							createElement("span", { className: "cbc-muted" }, "账号"),
 +							accts.map(function (a) {
 +								return createElement(CbcButton, {
@@ -967,7 +967,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec
 +								}, (a.nickname || a.id) + (a.active ? " ✓" : "") + (a.active && oauth.needsRelogin ? "（需重登）" : ""));
 +							})));
 +					} else if (accts.length === 1) {
-+						parts.push(createElement("div", { key: "accts1", className: "cbc-addrow" },
++						parts.push(createElement("div", { key: "accts1", className: "cbc-addrow", style: { marginBottom: 10 } },
 +							createElement("span", { className: "cbc-muted" }, "账号"),
 +							createElement("span", { className: "cbc-cell-name", title: "令牌至 " + (accts[0].expiresAt ? fmtTime(accts[0].expiresAt) : "未知") + (oauth.needsRelogin ? "（需重新登录）" : "") }, accts[0].nickname || accts[0].id)));
 +					}
@@ -1038,7 +1038,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec
 +					// 当前账号名——否则用户看不到多账号功能的存在（2026-10-23
 +					// 反馈：只有 1 个号时切换组不出现，功能不可发现）。
 +					toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length > 1
-+						? createElement("div", { key: "taccts", className: "cbc-addrow" },
++						? createElement("div", { key: "taccts", className: "cbc-addrow", style: { marginBottom: 10 } },
 +							createElement("span", { className: "cbc-muted" }, "账号"),
 +							toauth.accounts.map(function (a) {
 +								return createElement(CbcButton, {
@@ -1055,7 +1055,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec
 +								}, (a.nickname || a.id) + (a.active ? " ✓" : "") + (a.active && toauth.needsRelogin ? "（需重登）" : ""));
 +							}))
 +						: toauth.signedIn && Array.isArray(toauth.accounts) && toauth.accounts.length === 1
-+							? createElement("div", { key: "taccts1", className: "cbc-addrow" },
++							? createElement("div", { key: "taccts1", className: "cbc-addrow", style: { marginBottom: 10 } },
 +								createElement("span", { className: "cbc-muted" }, "账号"),
 +								createElement("span", { className: "cbc-cell-name", title: "令牌至 " + (toauth.accounts[0].expiresAt ? fmtTime(toauth.accounts[0].expiresAt) : "未知") + (toauth.needsRelogin ? "（需重新登录）" : "") }, toauth.accounts[0].nickname || toauth.accounts[0].id))
 +							: null,
@@ -1134,7 +1134,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec
 +				// 多账号：切换组（≥2 个显示）+ 单账号也显示当前账号名（2026-10-24
 +				// 与 CodeBuddy/Trae 同款可发现性）。余额行按 activeAccountId 重拉。
 +				qoauth.signedIn && Array.isArray(qoauth.accounts) && qoauth.accounts.length > 1
-+					? createElement("div", { key: "qaccts", className: "cbc-addrow" },
++					? createElement("div", { key: "qaccts", className: "cbc-addrow", style: { marginBottom: 10 } },
 +						createElement("span", { className: "cbc-muted" }, "账号"),
 +						qoauth.accounts.map(function (a) {
 +							return createElement(CbcButton, {
@@ -1151,7 +1151,7 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec
 +							}, (a.nickname || a.id) + (a.active ? " ✓" : "") + (a.active && qoauth.needsRelogin ? "（需重登）" : ""));
 +						}))
 +					: qoauth.signedIn && Array.isArray(qoauth.accounts) && qoauth.accounts.length === 1
-+						? createElement("div", { key: "qaccts1", className: "cbc-addrow" },
++						? createElement("div", { key: "qaccts1", className: "cbc-addrow", style: { marginBottom: 10 } },
 +							createElement("span", { className: "cbc-muted" }, "账号"),
 +							createElement("span", { className: "cbc-cell-name", title: "令牌至 " + (qoauth.accounts[0].expiresAt ? fmtTime(qoauth.accounts[0].expiresAt) : "未知") + (qoauth.needsRelogin ? "（需重新登录）" : "") }, qoauth.accounts[0].nickname || qoauth.accounts[0].id))
 +						: null,
