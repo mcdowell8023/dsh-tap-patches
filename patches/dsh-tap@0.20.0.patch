@@ -50,7 +50,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a52978e1ed25 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4c22e20f0 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -549,17 +549,55 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
  
  const qoderRuntime = { running: false, port: null, lastError: null }
  
-@@ -1004,6 +1439,9 @@ let qoderSettingsFn = () => ({ qoderEnabled: false })
+@@ -1004,6 +1439,11 @@ let qoderSettingsFn = () => ({ qoderEnabled: false })
  const qoderProvider = createQoderProvider({
    readAuth: readQoderAuth,
    writeAuth: writeQoderAuth,
 +  readAuthStore: readQoderAuthStore,
++  noteBilling: noteQoderBilling,
++  billingView: readQoderBilling,
 +  setActiveAuthAccount: setActiveQoderAccount,
 +  markAuthAccountFailed: markQoderAccountFailed,
    settings: () => qoderSettingsFn(),
    meter,
    runtime: qoderRuntime,
-@@ -1444,9 +1882,18 @@ function hostReconcileView(webService) {
+@@ -1050,6 +1490,35 @@ function qoderEffortScope(id) {
+   return stored ? [...new Set([...declared, stored])] : declared
+ }
+ 
++/**
++ * 模型计费属性（上游 usage.billable 观测值）：{ [modelId]: { billable, at } }。
++ * 用途：设置卡给 Qoder 模型打「免费/收费」标签——上游响应里 model 恒为
++ * 'auto'（免费与收费模型都报它），只有 billable 能区分（2026-10-25 实测：
++ * 12 次 dfmodel 零扣额，6 次 qmodel_38max 扣 1 credit）。
++ */
++function readQoderBilling() {
++  const raw = readFileLayer().qoderBilling
++  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
++  const out = {}
++  for (const [id, v] of Object.entries(raw)) {
++    if (!v || typeof v !== 'object' || Array.isArray(v)) continue
++    if (typeof v.billable !== 'boolean') continue
++    out[id] = { billable: v.billable, at: Number.isFinite(v.at) ? v.at : 0 }
++  }
++  return out
++}
++
++function noteQoderBilling(model, billable) {
++  if (typeof model !== 'string' || !model) return
++  if (typeof billable !== 'boolean') return
++  const layer = readFileLayer()
++  const cur = readQoderBilling()
++  const prev = cur[model]
++  if (prev && prev.billable === billable) return   // 没变就不写盘
++  layer.qoderBilling = { ...cur, [model]: { billable, at: Date.now() } }
++  writeFileLayer(layer)
++}
++
+ function readQoderModelPrefs() {
+   const raw = readFileLayer().qoderModelPrefs
+   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+@@ -1444,9 +1913,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -581,7 +619,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1495,14 +1942,14 @@ function settingsView(resolveNow) {
+@@ -1495,14 +1973,14 @@ function settingsView(resolveNow) {
      // The raw file layer carries plaintext apiKeys[].key — never ship it to
      // the browser (the card only checks top-level field presence).
      user: maskedUserLayer(user),
@@ -598,16 +636,17 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
        bridge: {
          running: traeRuntime.running,
          port: traeRuntime.port,
-@@ -1537,7 +1984,7 @@ function settingsView(resolveNow) {
+@@ -1537,7 +2015,8 @@ function settingsView(resolveNow) {
          : null,
      },
      qoder: {
 -      oauth: qoderProvider.credentialView(),
 +      oauth: { ...qoderProvider.credentialView(), ...qoderAccountsView() },
++      billing: readQoderBilling(),
        bridge: {
          running: qoderRuntime.running,
          port: qoderRuntime.port,
-@@ -1635,12 +2082,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1635,12 +2114,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -652,7 +691,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
                return
              }
              if (body?.action === 'model-list') {
-@@ -1804,17 +2281,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1804,17 +2313,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -700,7 +739,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
                return
              }
              if (body?.action === 'trae-model-sync') {
-@@ -1851,17 +2355,43 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1851,17 +2387,43 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -747,7 +786,18 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
                return
              }
              if (body?.action === 'qoder-model-sync') {
-@@ -2197,11 +2727,11 @@ export function apply(ctx, config = {}) {
+@@ -1878,6 +2440,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+                 ok: true,
+                 view: qoderProvider.catalogView(),
+                 disabled: Object.keys(readQoderModelState().disabled),
++                // 已观测的模型计费属性（usage.billable）——设置卡给模型打
++                // 「免费/收费」标签（上游响应 model 恒为 'auto'，只有 billable
++                // 能区分实际落点）。
++                billing: readQoderBilling(),
+               })
+               return
+             }
+@@ -2197,11 +2763,11 @@ export function apply(ctx, config = {}) {
    traeSettingsFn = resolveNow
    let stopTraeBridge = null
    let traeRunningPort = null
@@ -761,7 +811,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
          stopTraeBridge = null
          traeRunningPort = null
        }
-@@ -2213,13 +2743,23 @@ export function apply(ctx, config = {}) {
+@@ -2213,13 +2779,23 @@ export function apply(ctx, config = {}) {
      }
      // Same wedge self-heal as syncBridge above: lastError set = not actually
      // listening, retry instead of early-returning.
@@ -787,7 +837,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
      traeProvider.syncCatalog().then((r) => {
        if (r.ok) {
          syncTraeModelsToDshSettings()
-@@ -2236,11 +2776,11 @@ export function apply(ctx, config = {}) {
+@@ -2236,11 +2812,11 @@ export function apply(ctx, config = {}) {
    qoderSettingsFn = resolveNow
    let stopQoderBridge = null
    let qoderRunningPort = null
@@ -801,7 +851,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
          stopQoderBridge = null
          qoderRunningPort = null
        }
-@@ -2250,13 +2790,19 @@ export function apply(ctx, config = {}) {
+@@ -2250,13 +2826,19 @@ export function apply(ctx, config = {}) {
        syncQoderModelsToDshSettings()
        return
      }
@@ -824,7 +874,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..4d0db98a18171db7bce8926f3994a529
        if (r.ok) {
          syncQoderModelsToDshSettings()
 diff --git a/lib/client.js b/lib/client.js
-index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..d7e83bbc295b7c79f097cc2c807c73efd2e0156b 100644
+index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..8646f183b5ae491e6450912148f770ec65035985 100644
 --- a/lib/client.js
 +++ b/lib/client.js
 @@ -1152,16 +1152,57 @@ window.__ModuleLoader__.load({
@@ -969,7 +1019,25 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..d7e83bbc295b7c79f097cc2c807c73ef
  				createElement("div", { className: "cbc-row" },
  					createElement("div", { className: "cbc-row-label" }, "余额"),
  					createElement("div", { className: "cbc-row-control" },
-@@ -2456,7 +2535,7 @@ window.__ModuleLoader__.load({
+@@ -2382,6 +2461,8 @@ window.__ModuleLoader__.load({
+ 			var listState = useState(null); // {profiles, disabled:{id:true}} 来自 qoder-model-list
+ 			var qlist = listState[0];
+ 			var setQlist = listState[1];
++			// 已观测的模型计费属性（后端 usage.billable 观测值，来自 model-list）。
++			var qbilling = (qlist && qlist.billing) || {};
+ 			// 模型筛选（与 CodeBuddy/Trae 模型组同款）：只过滤渲染，不发请求。
+ 			var qfilterState = useState("");
+ 			var qfilter = qfilterState[0];
+@@ -2425,7 +2506,7 @@ window.__ModuleLoader__.load({
+ 					if (!res.ok) return;
+ 					var disabled = {};
+ 					(res.d.disabled || []).forEach(function (id) { disabled[id] = true; });
+-					setQlist({ profiles: (res.d.view && res.d.view.profiles) || [], disabled: disabled });
++					setQlist({ profiles: (res.d.view && res.d.view.profiles) || [], disabled: disabled, billing: res.d.billing || {} });
+ 				}).catch(function (e) {
+ 					// 同 Trae 区纪律：拉取失败带原因（踩坑 #7），`!res.ok` 的已知空态不进来。
+ 					setErr("Qoder 模型目录读取失败：" + (e && e.message ? e.message : "（网络）"));
+@@ -2456,7 +2537,7 @@ window.__ModuleLoader__.load({
  					setQuota({ error: e && e.message ? e.message : "（网络）" });
  				});
  			};
@@ -978,7 +1046,34 @@ index 302b7726aa35b9532c4d2c12d4a9edff14626e6f..d7e83bbc295b7c79f097cc2c807c73ef
  			var qfmtPool = function (q) { return "余 " + fmtCredit(q.remaining) + " / " + fmtCredit(q.total) + (q.unit ? " " + q.unit : ""); };
  			var balanceText = !quota ? "读取中…"
  				: quota.error ? "—（" + quota.error + "）"
-@@ -2618,6 +2697,41 @@ window.__ModuleLoader__.load({
+@@ -2586,12 +2667,25 @@ window.__ModuleLoader__.load({
+ 									createElement("option", { value: "" }, "上下文:" + defVar.name),
+ 									variants.map(function (v) { return createElement("option", { key: v.name, value: v.name }, "上下文:" + v.name); }));
+ 							}
++							// 计费属性标签（2026-10-25）：上游 usage.billable 是唯一
++							// 判据——上游响应里 model 恒为 'auto'（免费与收费模型都
++							// 报它），只有 billable 能区分。只显示**已观测**过的
++							// 模型（观测值来自实际请求的 usage），不臆造。
++							var bill = qbilling[p.id];
++							var billTag = bill
++								? createElement("span", {
++									className: bill.billable ? "cbc-warn" : "cbc-status",
++									title: bill.billable
++										? "实测：该模型请求会计入附加额度池（收费）"
++										: "实测：该模型请求不计入附加额度池（免费）",
++								}, bill.billable ? "收费" : "免费")
++								: null;
+ 							return createElement(SubModelRow, {
+ 								key: p.id, id: p.id, name: p.name, enabled: enabled,
+ 								titleOn: "加入 Qoder 路由", titleOff: "从 Qoder 路由移除",
+ 								ctx: effWindow, image: !!(p.input && p.input.indexOf("image") >= 0),
+ 								onToggle: function (e) { toggleQmodel(p, e.target.checked); },
+-								extra: createElement(Fragment, null, effortSel, ctxSel),
++								extra: createElement(Fragment, null, billTag, effortSel, ctxSel),
+ 							});
+ 						}) : createElement("p", { className: "cbc-muted" }, "无匹配模型")),
+ 					createElement(HelpNote, null, "勾选控制每个 Qoder 模型是否进对话选择器；行内 select 逐模型调思考强度（档位来自 Qoder 目录的逐模型声明，与输入框模型菜单里的「推理等级」同一真源）与上下文长度（写文件层 prefs 并镜像进 settings.yaml，均免重启）；目录没声明档位的模型不出思考强度控件；全部取消 = 整个 Qoder 路由从选择器移除。"));
+@@ -2618,6 +2712,41 @@ window.__ModuleLoader__.load({
  							? createElement("span", { className: qTest.ok ? "cbc-status" : "cbc-warn", "data-test": "qoder" }, qTest.text)
  							: null),
  				}),
@@ -1151,10 +1246,23 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d8504
        // 是 null = 省略参数；无表模型/非法档位同）。调用方（pi-ai / dsh 核心
        // UI）显式携带 reasoning_effort 时绝不覆盖。
 diff --git a/providers/qoder/gateway.js b/providers/qoder/gateway.js
-index 74600ed07316b5b133f3c6b025129b7163c95d55..c66a9dc221ee9ae9e4181606be08ddffc68921c9 100644
+index 74600ed07316b5b133f3c6b025129b7163c95d55..46b5285d842a6d1825110803a8d820f878803fed 100644
 --- a/providers/qoder/gateway.js
 +++ b/providers/qoder/gateway.js
-@@ -143,6 +143,56 @@ export function createQoderEnvelopeParser() {
+@@ -122,6 +122,12 @@ export function createQoderEnvelopeParser() {
+           completion_tokens: u.completion_tokens ?? 0,
+           total_tokens: u.total_tokens ?? 0,
+           credit: typeof u.credits === 'number' ? u.credits : 0,
++          // billable 是上游给的**计费判据**（false = 免费模型池，true = 收费
++          // 池）。上游响应里的 model 字段恒为 'auto'（免费/收费模型都报它），
++          // 所以「这次是否扣额度」只能看 billable——2026-10-25 实测：
++          // 12 次 dfmodel（DeepSeek-Flash，免费）额度零增长；6 次
++          // qmodel_38max（收费）扣 1 credit。透传给下游并在设置卡标注。
++          ...(typeof u.billable === 'boolean' ? { billable: u.billable } : {}),
+         }
+       }
+       return { chunk }
+@@ -143,6 +149,56 @@ export function createQoderEnvelopeParser() {
   *   getModelPrefs?: () => object, // { [id]: { effort?, contextVariant? } } 出站补默认
   * }} deps
   */
@@ -1211,7 +1319,7 @@ index 74600ed07316b5b133f3c6b025129b7163c95d55..c66a9dc221ee9ae9e4181606be08ddff
  export function createQoderGateway(deps) {
    const limiter = new SessionLimiter()
    const logPrefix = '[dsh-tap/qoder]'
-@@ -366,7 +416,7 @@ export function createQoderGateway(deps) {
+@@ -366,7 +422,7 @@ export function createQoderGateway(deps) {
          const text = await upstreamResp.text().catch(() => '')
          const status = upstreamResp.status === 401 || upstreamResp.status === 429 ? upstreamResp.status : 502
          res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -1220,7 +1328,7 @@ index 74600ed07316b5b133f3c6b025129b7163c95d55..c66a9dc221ee9ae9e4181606be08ddff
          gwLog({ dir: 'err', status: upstreamResp.status, model, ms: Date.now() - t0 })
          report('error', null)
          return
-@@ -423,10 +473,10 @@ export function createQoderGateway(deps) {
+@@ -423,10 +479,10 @@ export function createQoderGateway(deps) {
                gwLog({ dir: 'err', model, ms: Date.now() - t0, note: 'stream-error-frame', repaired: repairedNote })
                report('error', null)
                if (wantStream) {
@@ -1233,14 +1341,39 @@ index 74600ed07316b5b133f3c6b025129b7163c95d55..c66a9dc221ee9ae9e4181606be08ddff
                }
                return
              }
+@@ -477,6 +533,7 @@ export function createQoderGateway(deps) {
+         }))
+       }
+       if (usage) deps.meter.record({ ts: t0, kind: 'chat', model, usage })
++      if (usage && typeof usage.billable === 'boolean') deps.noteUsageBilling?.(model, usage.billable)
+       gwLog({ dir: 'out', model, ms: Date.now() - t0, bytes: content.length, usage, finishReason, repaired: repairedNote })
+       report('complete', usage ?? null)
+     } catch (err) {
 diff --git a/providers/qoder/index.js b/providers/qoder/index.js
-index a688952077dbadb3a1e2461834309b6e5dbc9daa..0fd217ece46821c60624f5d21949df2d2b4b0608 100644
+index a688952077dbadb3a1e2461834309b6e5dbc9daa..ffa30f7beb54b9b74094d04af8b9971f121f9110 100644
 --- a/providers/qoder/index.js
 +++ b/providers/qoder/index.js
-@@ -94,8 +94,31 @@ export function createQoderProvider(deps) {
+@@ -94,8 +94,48 @@ export function createQoderProvider(deps) {
        return oauth.oauthStatus()
      },
  
++    /**
++     * 记录某模型的计费属性（上游 usage.billable：false=免费池、true=收费池）。
++     * 落 file layer（qoderBilling），跨重启保留——设置卡据此给模型打
++     * 「免费/收费」标签，避免用户以为免费模型却被计费（上游响应里 model
++     * 恒为 'auto'，只有 billable 能区分）。
++     */
++    noteUsageBilling(model, billable) {
++      if (typeof model !== 'string' || !model) return
++      if (typeof billable !== 'boolean') return
++      deps.noteBilling?.(model, billable)
++    },
++
++    /** 已观测的模型计费属性（设置卡展示用）。 */
++    billingView() {
++      return deps.billingView?.() ?? {}
++    },
++
 +    /**
 +     * 额度/凭据类拒绝（401/403/429）后的自动切号——与 CodeBuddy/Trae 同款
 +     * 串行语义：当前账号进 10 分钟冷宫，切到下一个未冷却的账号。
