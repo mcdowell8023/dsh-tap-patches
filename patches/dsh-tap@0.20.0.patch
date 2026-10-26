@@ -50,7 +50,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..deb0f7770ef91ec799c66ff579d1ce8f
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
 diff --git a/index.js b/index.js
-index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4c22e20f0 100644
+index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..eb5b50acb5d572a87e8645d87d35d44b01492f9f 100644
 --- a/index.js
 +++ b/index.js
 @@ -48,6 +48,7 @@ import { chmodSync, readFileSync } from 'node:fs'
@@ -94,7 +94,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
  import { createHostConfigLayer } from './host-config.js'
  import arkProvider from './providers/ark/index.js'
  import bailianProvider from './providers/bailian/index.js'
-@@ -244,8 +271,132 @@ function validateBaseURL(value) {
+@@ -244,8 +271,146 @@ function validateBaseURL(value) {
  
  const readFileLayer = () => readJson(SETTINGS_PATH)
  const writeFileLayer = (section) => writeJson(SETTINGS_PATH, section)
@@ -112,6 +112,14 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
 +// 状态机，登录第二个号时 writeAuth 收到不同 uid 就自动新增一条。
 +const authStoreId = (account, index) =>
 +  (typeof account?.uid === 'string' && account.uid) || `acc${index + 1}`
++
++/** 账号簿最近变更留痕（排查"切号后变回"用）：{ at, from, to, by }[]，保留最近 10 条。 */
++function pushAuthChange(store, from, to, by) {
++  if (!from && !to) return
++  const log = Array.isArray(store.activeAccountLog) ? store.activeAccountLog.slice(-9) : []
++  log.push({ at: Date.now(), from: from ?? null, to: to ?? null, by: String(by || 'unknown') })
++  store.activeAccountLog = log
++}
 +
 +function readAuthStore() {
 +  const raw = readJson(AUTH_PATH)
@@ -157,7 +165,9 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
 +      const active = activeAuthAccount(store)
 +      if (active) {
 +        store.accounts = store.accounts.filter((a) => a.id !== active.id)
++        const prevActive = store.activeAccountId
 +        store.activeAccountId = store.accounts[0]?.id ?? null
++        pushAuthChange(store, prevActive, store.activeAccountId, 'logout')
 +      }
 +      if (store.accounts.length === 0) {
 +        writeJson(AUTH_PATH, {})
@@ -174,7 +184,9 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
 +      } else {
 +        const id = authStoreId(v.account, store.accounts.length)
 +        store.accounts.push({ id, auth: v.auth, account: v.account ?? {}, addedAt: Date.now() })
++        const prevActive = store.activeAccountId
 +        store.activeAccountId = id
++        pushAuthChange(store, prevActive, id, 'oauth-login')
 +      }
 +      if (store.activeAccountId === null && store.accounts.length > 0) store.activeAccountId = store.accounts[0].id
 +    }
@@ -204,7 +216,9 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
 +  const store = readAuthStore()
 +  if (!store.accounts.some((a) => a.id === id)) return false
 +  if (store.activeAccountId !== id) {
++    const prevActive = store.activeAccountId
 +    store.activeAccountId = id
++    pushAuthChange(store, prevActive, id, 'user-switch')
 +    store.schemaVersion = 2
 +    writeJson(AUTH_PATH, store)
 +  }
@@ -229,7 +243,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
  
  // ---------------------------------------------------------------------------
  // 桥端口按运行时宿主 profile 分流（goal docs/goals/bridge-port-host-split.md）。
-@@ -870,6 +1021,9 @@ const provider = createCodeBuddyProvider({
+@@ -870,6 +1035,9 @@ const provider = createCodeBuddyProvider({
    meter,
    readAuth,
    writeAuth,
@@ -239,7 +253,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
    envKey,
    withKeyRotation: (settings, attempt) => withKeyRotation(settings, attempt),
    resolveCredential: (settings) => resolveCredential(settings),
-@@ -942,8 +1096,150 @@ async function withKeyRotation(settings, attempt) {
+@@ -942,8 +1110,150 @@ async function withKeyRotation(settings, attempt) {
  // 模型，清单永远由镜像独占（无"陈旧遮蔽"问题，纯净态=删镜像路径）。
  // ---------------------------------------------------------------------------
  
@@ -392,7 +406,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
  
  const traeRuntime = { running: false, port: null, lastError: null }
  
-@@ -978,6 +1274,9 @@ let traeSettingsFn = () => ({ traeEnabled: false })
+@@ -978,6 +1288,9 @@ let traeSettingsFn = () => ({ traeEnabled: false })
  const traeProvider = createTraeProvider({
    readAuth: readTraeAuth,
    writeAuth: writeTraeAuth,
@@ -402,7 +416,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
    settings: () => traeSettingsFn(),
    withCredentials: (attempt) => withTraeCredentials(() => traeSettingsFn(), attempt),
    meter,
-@@ -993,8 +1292,144 @@ const traeProvider = createTraeProvider({
+@@ -993,8 +1306,144 @@ const traeProvider = createTraeProvider({
  // 镜像 providers.qoder 整块（路由存在性管理，同 trae 踩坑 #25 纪律）。
  // ---------------------------------------------------------------------------
  
@@ -549,7 +563,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
  
  const qoderRuntime = { running: false, port: null, lastError: null }
  
-@@ -1004,6 +1439,11 @@ let qoderSettingsFn = () => ({ qoderEnabled: false })
+@@ -1004,6 +1453,11 @@ let qoderSettingsFn = () => ({ qoderEnabled: false })
  const qoderProvider = createQoderProvider({
    readAuth: readQoderAuth,
    writeAuth: writeQoderAuth,
@@ -561,7 +575,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
    settings: () => qoderSettingsFn(),
    meter,
    runtime: qoderRuntime,
-@@ -1050,6 +1490,35 @@ function qoderEffortScope(id) {
+@@ -1050,6 +1504,35 @@ function qoderEffortScope(id) {
    return stored ? [...new Set([...declared, stored])] : declared
  }
  
@@ -597,7 +611,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
  function readQoderModelPrefs() {
    const raw = readFileLayer().qoderModelPrefs
    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
-@@ -1444,9 +1913,18 @@ function hostReconcileView(webService) {
+@@ -1444,9 +1927,18 @@ function hostReconcileView(webService) {
    // 注意 webPin 不进 drift[]：drift 是通道形状（channel/expected/actual 模型数），
    // 区块头与对账分区分别直读 webPin.ok，避免污染通道行的 warn 不变量。
    try {
@@ -619,7 +633,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
        out.webPin = { searchProvider: sp ?? null, fetchProvider: fp ?? null, ok: sp === 'codebuddy' && fp === 'codebuddy' }
      }
    } catch { out.webPin = null }
-@@ -1495,14 +1973,14 @@ function settingsView(resolveNow) {
+@@ -1495,14 +1987,14 @@ function settingsView(resolveNow) {
      // The raw file layer carries plaintext apiKeys[].key — never ship it to
      // the browser (the card only checks top-level field presence).
      user: maskedUserLayer(user),
@@ -636,7 +650,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
        bridge: {
          running: traeRuntime.running,
          port: traeRuntime.port,
-@@ -1537,7 +2015,8 @@ function settingsView(resolveNow) {
+@@ -1537,7 +2029,8 @@ function settingsView(resolveNow) {
          : null,
      },
      qoder: {
@@ -646,7 +660,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
        bridge: {
          running: qoderRuntime.running,
          port: qoderRuntime.port,
-@@ -1635,12 +2114,42 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1635,12 +2128,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
              if (body?.action === 'oauth-start') {
                provider.oauth.startOAuth(resolveNow().baseURL)
@@ -670,7 +684,9 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
 +                sendJSON(response, 404, { ok: false, error: '账号不存在' })
 +                return
 +              }
++              const prevActive = store.activeAccountId
 +              store.activeAccountId = id
++              pushAuthChange(store, prevActive, id, 'user-switch')
 +              writeJson(AUTH_PATH, store)
 +              sendJSON(response, 200, { ok: true, oauth: { ...provider.oauth.oauthStatus(), ...authAccountsView() } })
 +              return
@@ -691,7 +707,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
                return
              }
              if (body?.action === 'model-list') {
-@@ -1804,17 +2313,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1804,17 +2329,44 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- TraeWork CN 通道（v0.8.x）----
              if (body?.action === 'trae-oauth-start') {
                traeProvider.oauth.startOAuth(resolveNow())
@@ -739,7 +755,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
                return
              }
              if (body?.action === 'trae-model-sync') {
-@@ -1851,17 +2387,43 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1851,17 +2403,43 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
              // ---- Qoder CN 通道 ----
              if (body?.action === 'qoder-oauth-start') {
                qoderProvider.oauth.startOAuth(resolveNow())
@@ -786,7 +802,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
                return
              }
              if (body?.action === 'qoder-model-sync') {
-@@ -1878,6 +2440,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
+@@ -1878,6 +2456,10 @@ function registerSettingsRoute(ctx, entryConfig, resolveNow, applyLive, retryGat
                  ok: true,
                  view: qoderProvider.catalogView(),
                  disabled: Object.keys(readQoderModelState().disabled),
@@ -797,7 +813,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
                })
                return
              }
-@@ -2197,11 +2763,11 @@ export function apply(ctx, config = {}) {
+@@ -2197,11 +2779,11 @@ export function apply(ctx, config = {}) {
    traeSettingsFn = resolveNow
    let stopTraeBridge = null
    let traeRunningPort = null
@@ -811,7 +827,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
          stopTraeBridge = null
          traeRunningPort = null
        }
-@@ -2213,13 +2779,23 @@ export function apply(ctx, config = {}) {
+@@ -2213,13 +2795,23 @@ export function apply(ctx, config = {}) {
      }
      // Same wedge self-heal as syncBridge above: lastError set = not actually
      // listening, retry instead of early-returning.
@@ -837,7 +853,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
      traeProvider.syncCatalog().then((r) => {
        if (r.ok) {
          syncTraeModelsToDshSettings()
-@@ -2236,11 +2812,11 @@ export function apply(ctx, config = {}) {
+@@ -2236,11 +2828,11 @@ export function apply(ctx, config = {}) {
    qoderSettingsFn = resolveNow
    let stopQoderBridge = null
    let qoderRunningPort = null
@@ -851,7 +867,7 @@ index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..63a7b81d7244317bc050ccee784d68f4
          stopQoderBridge = null
          qoderRunningPort = null
        }
-@@ -2250,13 +2826,19 @@ export function apply(ctx, config = {}) {
+@@ -2250,13 +2842,19 @@ export function apply(ctx, config = {}) {
        syncQoderModelsToDshSettings()
        return
      }
