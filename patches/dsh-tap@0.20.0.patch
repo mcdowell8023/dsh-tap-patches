@@ -1,5 +1,5 @@
 diff --git a/core/bridge.js b/core/bridge.js
-index 5cf1aeab0debdacbbe94ae1630934946f027770f..0491d9fdd2ebad28f0b8af302808b34454c6d6bf 100644
+index 5cf1aeab0debdacbbe94ae1630934946f027770f..92f61b7d75c98895de018b0a6bffe46e922e5c85 100644
 --- a/core/bridge.js
 +++ b/core/bridge.js
 @@ -468,6 +468,9 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
@@ -41,7 +41,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..0491d9fdd2ebad28f0b8af302808b344
            err.name = 'AbortError'
            err.firstByteTimeout = true
            attemptAbort.abort(err)
-@@ -526,6 +534,39 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+@@ -526,6 +534,63 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
            signal: AbortSignal.any([clientAbort.signal, attemptAbort.signal]),
          }).finally(() => clearTimeout(firstByteTimer))
        })
@@ -58,6 +58,30 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..0491d9fdd2ebad28f0b8af302808b344
 +      // 排队 / 429 限流）且 provider 提供 rotateAccountOnQuota 时，把当前账号
 +      // 打进冷宫、切到下一个账号再试一次。只重试一次；流已开始的 2xx 不进这
 +      // 里（响应头阶段才谈得上换号）。
++      // 400/11128「unapproved channel」= 上游的**策略性/瞬时**拒绝（2026-10-28
++      // 实测：同一请求体连打 3 次全 200，间隔几分钟又会整体被拒；上游对该
++      // 客户端的渠道校验有抖动）。重试一次（+1.2s）通常直接通过。
++      if (upstream0 && upstream0.ok === false && upstream0.status === 400) {
++        const peek = await upstream0.clone().text().catch(() => '')
++        if (peek.includes('11128')) {
++          logOut({ waitMs, retry11128: true })
++          await new Promise((r) => setTimeout(r, 1200))
++          const retry = await runAttempt()
++          if (retry.cred) {
++            cred = retry.cred
++            upstream0 = retry.res
++            err = retry.err
++            if (cred) {
++              servedAccount = {
++                uid: cred.headers?.['X-User-Id'] ?? null,
++                keyName: cred.keyName ?? null,
++                rotated: false,
++                retried11128: true,
++              }
++            }
++          }
++        }
++      }
 +      if (upstream0 && upstream0.ok === false && (upstream0.status === 401 || upstream0.status === 403 || upstream0.status === 429)) {
 +        const rotated = typeof provider.rotateAccountOnQuota === 'function'
 +          ? provider.rotateAccountOnQuota()
@@ -81,7 +105,7 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..0491d9fdd2ebad28f0b8af302808b344
        if (!cred || err) {
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
-@@ -545,6 +586,19 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+@@ -545,6 +610,19 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
        }
        const upstream = upstream0
        const ttfbMs = Date.now() - t0
