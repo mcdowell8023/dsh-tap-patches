@@ -1,5 +1,5 @@
 diff --git a/core/bridge.js b/core/bridge.js
-index 5cf1aeab0debdacbbe94ae1630934946f027770f..6a7bffedc1943d84884d24ba6371c8a73f1ae020 100644
+index 5cf1aeab0debdacbbe94ae1630934946f027770f..0491d9fdd2ebad28f0b8af302808b34454c6d6bf 100644
 --- a/core/bridge.js
 +++ b/core/bridge.js
 @@ -468,6 +468,9 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
@@ -81,6 +81,26 @@ index 5cf1aeab0debdacbbe94ae1630934946f027770f..6a7bffedc1943d84884d24ba6371c8a7
        if (!cred || err) {
          if (err?.clientDisconnected === true) {
            // The caller hung up mid-handshake — nobody left to answer.
+@@ -545,6 +586,19 @@ export function createBridge({ settings, provider, withCredentials, meter, foren
+       }
+       const upstream = upstream0
+       const ttfbMs = Date.now() - t0
++      // 上游 4xx 现场取证：400/11128「unapproved channel」这类渠道校验拒绝，
++      // 根因在请求正文里的某个片段（逐短语猜测实测无效：身份串变体、档位、
++      // 工具数、模型都复现不了）。命中即把该次请求正文落盘，供事后 grep
++      // 定位触发片段——2026-10-26 实测失败请求：minimax-m3.1-flash + 76 工具
++      // + 286KB 正文 + xhigh，同形态小请求恒 200。
++      if (!upstream.ok && upstream.status === 400 && isChat) {
++        try {
++          const dir = forensics.dumpDir?.() || '/tmp/dsh-tap-dumps'
++          mkdirSync(dir, { recursive: true })
++          writeFileSync(join(dir, `err400-${Date.now()}-${payload?.model || 'unknown'}.json`), body)
++          logOut({ status: upstream.status, dumped: true, dumpDir: dir })
++        } catch { /* best-effort 取证 */ }
++      }
+       if (aggregate) {
+         const tap = { usage: null }
+         await aggregateChatCompletion(upstream, res, payload.model, tap)
 diff --git a/index.js b/index.js
 index 2f3bf957f1e41c52071cd5db075c0dd05f4c50a1..7d4d6eb585501f06dbc08dbba915669dcd1105bb 100644
 --- a/index.js
