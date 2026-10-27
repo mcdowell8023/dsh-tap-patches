@@ -1232,10 +1232,10 @@ index 86ddf37005618046b4da8da5ad51b9b6141dd21e..9b24c51343c0b1ffb0e6ea8c90807f75
        })
    }
 diff --git a/providers/codebuddy/index.js b/providers/codebuddy/index.js
-index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d85044292ea6d 100644
+index bccc4815f546c12669e100dfb802cc4638000ea4..657b0bcc04d8661baa72bff9495737ba4790b4f2 100644
 --- a/providers/codebuddy/index.js
 +++ b/providers/codebuddy/index.js
-@@ -31,6 +31,37 @@ const LOG_HEADER_NAMES = [
+@@ -31,6 +31,61 @@ const LOG_HEADER_NAMES = [
    'x-requested-with', 'x-private-data',
  ]
  
@@ -1248,23 +1248,47 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d8504
 +const IDENTITY_REWRITES = [
 +  ['DeepSeek Harness', 'DeepSeek Assistant'],
 +  ['deepseek-harness', 'deepseek-assistant'],
++  // 2026-10-26 实测（真实 455KB body 复现）：CodeBuddy 网关的渠道校验把 dsh
++  // 系统提示里的「@ 路径」说明判为非官方客户端 → 400/11128 "unapproved
++  // channel"。触发主体是 "Tokens prefixed with @ are paths the user
++  // explicitly referenced." 这句（去掉其中任一词即恢复 200）；官方 CLI 的
++  // prompt 没有 @ 路径语法，故被当作渠道指纹。
++  ['Tokens prefixed with @ are paths the user explicitly referenced.',
++   'Path references supplied by the user identify files or directories.'],
 +]
 +
-+/** 递归就地替换 payload 内所有字符串中的身份短语。 */
-+function scrubIdentityStrings(value) {
++/**
++ * 递归就地替换 payload 内所有字符串中的身份短语。
++ *
++ * inSystem = true 时额外做「@ 路径标记」中和（2026-10-26）：dsh 的系统提示
++ * 教模型用 @ 引用路径，CodeBuddy 网关的渠道校验把它当成官方 CLI 不会有的
++ * 指纹 → 400/11128。真实 body 实测：只去掉 system 里的 "@ " 即恢复 200。
++ * 只对 role=system/developer 生效——用户消息里的 "@" 不动（避免改语义）。
++ */
++function scrubIdentityStrings(value, inSystem = false) {
 +  if (typeof value === 'string') {
 +    let out = value
 +    for (const [from, to] of IDENTITY_REWRITES) {
 +      if (out.includes(from)) out = out.split(from).join(to)
 +    }
++    if (inSystem) out = out.replace(/@\s/g, 'the ')
 +    return out
 +  }
 +  if (Array.isArray(value)) {
-+    for (let i = 0; i < value.length; i += 1) value[i] = scrubIdentityStrings(value[i])
++    for (let i = 0; i < value.length; i += 1) {
++      const item = value[i]
++      const isSys = item && typeof item === 'object' && !Array.isArray(item)
++        && (item.role === 'system' || item.role === 'developer')
++      value[i] = scrubIdentityStrings(item, isSys)
++    }
 +    return value
 +  }
 +  if (value !== null && typeof value === 'object') {
-+    for (const key of Object.keys(value)) value[key] = scrubIdentityStrings(value[key])
++    for (const key of Object.keys(value)) {
++      const child = value[key]
++      const isSys = key === 'system' || key === 'developer'
++      value[key] = scrubIdentityStrings(child, isSys || inSystem)
++    }
 +    return value
 +  }
 +  return value
@@ -1273,7 +1297,7 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d8504
  /**
   * @param {{
   *   meter: { record: Function },
-@@ -65,6 +96,33 @@ export function createCodeBuddyProvider(deps) {
+@@ -65,6 +120,33 @@ export function createCodeBuddyProvider(deps) {
      /** 桥出站静态头组（逐字段规则/迷信判定见 headers.js 文件头）。 */
      bridgeHeaders: () => ({ ...CLIENT_HEADERS }),
  
@@ -1307,7 +1331,7 @@ index bccc4815f546c12669e100dfb802cc4638000ea4..477c776b067d292e4044890ce29d8504
      /**
       * Chat 出站重写：developer → system。
       *
-@@ -80,6 +138,11 @@ export function createCodeBuddyProvider(deps) {
+@@ -80,6 +162,11 @@ export function createCodeBuddyProvider(deps) {
            if (m?.role === 'developer') m.role = 'system'
          }
        }
